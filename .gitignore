@@ -38,6 +38,10 @@ env/
 .env.local
 .env.*.local
 
+# Tenant config (contains secrets)
+tenants.json
+products_*.json
+
 # Logs
 *.log
 logs/

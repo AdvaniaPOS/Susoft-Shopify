@@ -28,6 +28,9 @@ flower==2.0.1
 structlog==24.1.0
 python-json-logger==2.0.7
 
+# CLI Tools
+rich==13.7.0
+
 # Retry logic
 tenacity==8.2.3
 

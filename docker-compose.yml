@@ -1,0 +1,151 @@
+# Susoft-Shopify Sync - Docker Compose
+# =====================================
+# Development environment with PostgreSQL and Redis
+
+services:
+  # ===================
+  # Main API Service
+  # ===================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: susoft-shopify-api
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/susoft_shopify
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - susoft-network
+
+  # ===================
+  # Celery Worker
+  # ===================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: susoft-shopify-worker
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/susoft_shopify
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+    command: celery -A app.workers.celery_app worker --loglevel=info -Q default,orders,stock,scheduled
+    networks:
+      - susoft-network
+
+  # ===================
+  # Celery Beat Scheduler
+  # ===================
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: susoft-shopify-beat
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/susoft_shopify
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+    depends_on:
+      - worker
+    volumes:
+      - ./app:/app/app
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    networks:
+      - susoft-network
+
+  # ===================
+  # PostgreSQL Database
+  # ===================
+  db:
+    image: postgres:16-alpine
+    container_name: susoft-shopify-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=susoft_shopify
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - susoft-network
+
+  # ===================
+  # Redis
+  # ===================
+  redis:
+    image: redis:7-alpine
+    container_name: susoft-shopify-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - susoft-network
+
+  # ===================
+  # Flower (Celery Monitor)
+  # ===================
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: susoft-shopify-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - redis
+      - worker
+    command: celery -A app.workers.celery_app flower --port=5555
+    networks:
+      - susoft-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  susoft-network:
+    driver: bridge

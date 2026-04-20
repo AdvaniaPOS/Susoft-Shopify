@@ -1,0 +1,260 @@
+"""
+Scheduled Tasks
+================
+Periodic tasks run by Celery Beat for maintenance and monitoring.
+
+Tasks:
+- check_stuck_tasks: Find and alert on stuck tasks (>5 min in processing)
+- send_dlq_alerts: Send notifications for unalerted DLQ items
+- check_tenant_heartbeats: Monitor tenant integration health
+- daily_stock_reconciliation: Full stock sync to catch any drift
+"""
+
+import asyncio
+from datetime import datetime, timezone, timedelta
+
+import structlog
+
+from app.workers.celery_app import celery_app
+from app.workers.tasks import sync_stock_to_shopify
+from app.core.config import settings
+from app.core.database import get_session_context
+from app.db.repositories import (
+    TenantRepository,
+    IntegrationQueueRepository,
+    DeadLetterQueueRepository,
+    SyncLogRepository
+)
+from app.db.models import IntegrationQueueStatus, SyncStatus
+from app.utils.notifier import (
+    send_slack_notification,
+    send_telegram_notification,
+    format_dlq_alert,
+    format_stuck_task_alert,
+    format_tenant_offline_alert
+)
+
+
+logger = structlog.get_logger()
+
+
+@celery_app.task
+def check_stuck_tasks():
+    """
+    Check for tasks stuck in processing state for too long.
+    
+    Alert threshold is configurable via settings.alert_threshold_minutes.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _check_stuck_tasks_async()
+    )
+
+
+async def _check_stuck_tasks_async():
+    """Async implementation of stuck task checker."""
+    threshold = timedelta(minutes=settings.alert_threshold_minutes)
+    cutoff_time = datetime.now(timezone.utc) - threshold
+    
+    async with get_session_context() as session:
+        queue_repo = IntegrationQueueRepository(session)
+        sync_repo = SyncLogRepository(session)
+        
+        # Find stuck queue items
+        stuck_items = await queue_repo.get_stuck_items(cutoff_time)
+        
+        if not stuck_items:
+            logger.debug("No stuck tasks found")
+            return
+        
+        logger.warning(
+            "Found stuck tasks",
+            count=len(stuck_items),
+            threshold_minutes=settings.alert_threshold_minutes
+        )
+        
+        # Group by tenant for alerting
+        by_tenant = {}
+        for item in stuck_items:
+            tenant_id = str(item.tenant_id)
+            if tenant_id not in by_tenant:
+                by_tenant[tenant_id] = []
+            by_tenant[tenant_id].append(item)
+        
+        # Send alerts
+        for tenant_id, items in by_tenant.items():
+            message = format_stuck_task_alert(
+                tenant_id=tenant_id,
+                stuck_tasks=items,
+                threshold_minutes=settings.alert_threshold_minutes
+            )
+            
+            await send_slack_notification(message)
+            await send_telegram_notification(message)
+            
+            # Mark items as alerted
+            for item in items:
+                await queue_repo.mark_alerted(item.id)
+
+
+@celery_app.task
+def send_dlq_alerts():
+    """
+    Send alerts for dead letter queue items that haven't been alerted yet.
+    
+    Groups items by tenant and sends summary notification.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _send_dlq_alerts_async()
+    )
+
+
+async def _send_dlq_alerts_async():
+    """Async implementation of DLQ alerter."""
+    async with get_session_context() as session:
+        dlq_repo = DeadLetterQueueRepository(session)
+        
+        # Get unalerted items
+        unalerted = await dlq_repo.get_unalerted_items()
+        
+        if not unalerted:
+            logger.debug("No new DLQ items to alert")
+            return
+        
+        logger.warning(
+            "Found unalerted DLQ items",
+            count=len(unalerted)
+        )
+        
+        # Group by tenant
+        by_tenant = {}
+        for item in unalerted:
+            tenant_id = str(item.tenant_id) if item.tenant_id else "unknown"
+            if tenant_id not in by_tenant:
+                by_tenant[tenant_id] = []
+            by_tenant[tenant_id].append(item)
+        
+        # Send alerts
+        for tenant_id, items in by_tenant.items():
+            message = format_dlq_alert(
+                tenant_id=tenant_id,
+                dlq_items=items
+            )
+            
+            await send_slack_notification(message)
+            await send_telegram_notification(message)
+            
+            # Mark items as alerted
+            for item in items:
+                await dlq_repo.mark_alerted(item.id)
+
+
+@celery_app.task
+def check_tenant_heartbeats():
+    """
+    Check tenant integration health via heartbeat timestamps.
+    
+    Alerts if a tenant hasn't synced in too long, indicating
+    possible integration issues.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _check_tenant_heartbeats_async()
+    )
+
+
+async def _check_tenant_heartbeats_async():
+    """Async implementation of heartbeat checker."""
+    # Alert if no heartbeat in 30 minutes
+    threshold = timedelta(minutes=30)
+    cutoff_time = datetime.now(timezone.utc) - threshold
+    
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+        
+        # Get active tenants with stale heartbeats
+        stale_tenants = await tenant_repo.get_stale_tenants(cutoff_time)
+        
+        if not stale_tenants:
+            logger.debug("All tenants healthy")
+            return
+        
+        logger.warning(
+            "Found tenants with stale heartbeats",
+            count=len(stale_tenants)
+        )
+        
+        for tenant in stale_tenants:
+            message = format_tenant_offline_alert(
+                tenant_name=tenant.name,
+                tenant_id=str(tenant.id),
+                last_heartbeat=tenant.last_sync_at
+            )
+            
+            await send_slack_notification(message)
+            await send_telegram_notification(message)
+
+
+@celery_app.task
+def daily_stock_reconciliation():
+    """
+    Perform daily full stock reconciliation for all active tenants.
+    
+    This catches any stock drift between systems that may have
+    occurred due to failed webhooks or timing issues.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _daily_stock_reconciliation_async()
+    )
+
+
+async def _daily_stock_reconciliation_async():
+    """Async implementation of daily reconciliation."""
+    logger.info("Starting daily stock reconciliation")
+    
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+        
+        # Get all active tenants
+        active_tenants = await tenant_repo.get_all_active()
+        
+        for tenant in active_tenants:
+            # Queue bulk sync for each tenant
+            sync_stock_to_shopify.apply_async(
+                kwargs={"tenant_id": str(tenant.id)},
+                queue="stock"
+            )
+        
+        logger.info(
+            "Queued daily reconciliation for tenants",
+            count=len(active_tenants)
+        )
+
+
+@celery_app.task
+def cleanup_old_sync_logs():
+    """
+    Clean up old sync logs to prevent database bloat.
+    
+    Retains logs for the configured retention period.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _cleanup_old_sync_logs_async()
+    )
+
+
+async def _cleanup_old_sync_logs_async():
+    """Async implementation of log cleanup."""
+    # Keep logs for 90 days
+    retention_days = 90
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    
+    async with get_session_context() as session:
+        sync_repo = SyncLogRepository(session)
+        
+        deleted_count = await sync_repo.delete_old_logs(cutoff_date)
+        
+        if deleted_count > 0:
+            logger.info(
+                "Cleaned up old sync logs",
+                deleted_count=deleted_count,
+                retention_days=retention_days
+            )

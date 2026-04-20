@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Admin Portal{% endblock %} - Susoft-Shopify Sync</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Alpine.js for interactivity -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    
+    <!-- Chart.js for graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-indigo-600 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="/portal/" class="text-white font-bold text-xl">
+                        🔄 Susoft-Shopify Sync
+                    </a>
+                    <div class="hidden md:flex ml-10 space-x-4">
+                        <a href="/portal/" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Dashboard
+                        </a>
+                        <a href="/portal/tenants" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Tenants
+                        </a>
+                        <a href="/portal/logs" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Synk Logger
+                        </a>
+                        <a href="/portal/system-logs" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            System Logger
+                        </a>
+                        <a href="/portal/errors" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Feil (DLQ)
+                        </a>
+                        <a href="/portal/sync" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Synkronisering
+                        </a>
+                        <a href="/portal/settings" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            ⚙️
+                        </a>
+                    </div>
+                </div>
+                <div class="flex items-center">
+                    <span id="clock" class="text-white text-sm mr-4"></span>
+                    <span class="text-indigo-200 text-sm">v1.0.0</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t mt-auto">
+        <div class="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8">
+            <p class="text-center text-gray-500 text-sm">
+                Susoft-Shopify Sync Admin Portal &copy; 2024 Advania
+            </p>
+        </div>
+    </footer>
+
+    <script>
+        // Clock
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent = now.toLocaleString('nb-NO');
+        }
+        updateClock();
+        setInterval(updateClock, 1000);
+
+        // API helper
+        const API_KEY = localStorage.getItem('admin_api_key') || '';
+        
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            const options = {
+                method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Admin-Api-Key': API_KEY
+                }
+            };
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+            const response = await fetch(`/admin${endpoint}`, options);
+            if (!response.ok) throw new Error(await response.text());
+            return response.json();
+        }
+
+        // Set API key
+        function setApiKey(key) {
+            localStorage.setItem('admin_api_key', key);
+            location.reload();
+        }
+    </script>
+    
+    {% block scripts %}{% endblock %}
+</body>
+</html>

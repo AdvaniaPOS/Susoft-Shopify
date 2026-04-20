@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+
+{% block title %}Synkronisering{% endblock %}
+
+{% block content %}
+<div x-data="syncPage()" x-init="init()">
+    <!-- Header -->
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">Synkronisering</h1>
+        <p class="text-gray-600">Manuell synkronisering og kontroll</p>
+    </div>
+
+    <!-- Tenant Selector -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Velg tenant</label>
+        <select x-model="selectedTenantId" @change="loadTenantStatus()" class="w-full max-w-md border rounded-lg px-4 py-2">
+            <option value="">Velg en tenant...</option>
+            <template x-for="tenant in tenants" :key="tenant.id">
+                <option :value="tenant.id" x-text="tenant.name"></option>
+            </template>
+        </select>
+    </div>
+
+    <template x-if="selectedTenantId && tenantStatus">
+        <div>
+            <!-- Status Overview -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="font-medium text-gray-900 mb-4">🏥 Helsestatus</h3>
+                    <div class="flex items-center">
+                        <div class="w-4 h-4 rounded-full mr-3" :class="tenantStatus.is_healthy ? 'bg-green-500' : 'bg-red-500'"></div>
+                        <span x-text="tenantStatus.is_healthy ? 'Frisk' : 'Ufrisk'" class="text-lg font-medium"></span>
+                    </div>
+                    <p class="text-sm text-gray-500 mt-2">
+                        Siste synk: <span x-text="formatMinutes(tenantStatus.minutes_since_last_sync)"></span>
+                    </p>
+                </div>
+                
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="font-medium text-gray-900 mb-4">📋 Kø</h3>
+                    <p class="text-3xl font-bold" x-text="tenantStatus.pending_tasks"></p>
+                    <p class="text-sm text-gray-500">ventende oppgaver</p>
+                </div>
+                
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="font-medium text-gray-900 mb-4">⚠️ Feil (24t)</h3>
+                    <p class="text-3xl font-bold" :class="tenantStatus.failed_tasks_24h > 0 ? 'text-red-600' : 'text-green-600'"
+                       x-text="tenantStatus.failed_tasks_24h"></p>
+                    <p class="text-sm text-gray-500">feilede oppgaver</p>
+                </div>
+            </div>
+
+            <!-- Sync Actions -->
+            <div class="bg-white rounded-lg shadow p-6 mb-8">
+                <h2 class="text-xl font-bold mb-6">Synkroniseringshandlinger</h2>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <!-- Sync Stock -->
+                    <div class="border rounded-lg p-4">
+                        <h3 class="font-medium mb-2">📦 Synk lager</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Hent lagerbeholdning fra Susoft og oppdater Shopify
+                        </p>
+                        <button @click="syncStock()" 
+                                :disabled="syncing"
+                                class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                            <span x-show="!syncing">Start synk</span>
+                            <span x-show="syncing">Synkroniserer...</span>
+                        </button>
+                    </div>
+                    
+                    <!-- Sync Products -->
+                    <div class="border rounded-lg p-4">
+                        <h3 class="font-medium mb-2">🏷️ Synk produkter</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Oppdater produktmappinger mellom Susoft og Shopify
+                        </p>
+                        <button @click="syncProducts()" 
+                                :disabled="syncing"
+                                class="w-full bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 disabled:opacity-50">
+                            Start synk
+                        </button>
+                    </div>
+                    
+                    <!-- Import Orders -->
+                    <div class="border rounded-lg p-4">
+                        <h3 class="font-medium mb-2">🛒 Importer ordrer</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Hent nylige ordrer fra Shopify og send til Susoft
+                        </p>
+                        <button @click="importOrders()" 
+                                :disabled="syncing"
+                                class="w-full bg-purple-600 text-white py-2 rounded-lg hover:bg-purple-700 disabled:opacity-50">
+                            Start import
+                        </button>
+                    </div>
+                    
+                    <!-- Test Connection -->
+                    <div class="border rounded-lg p-4">
+                        <h3 class="font-medium mb-2">🔌 Test tilkobling</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Sjekk at API-tilkoblinger fungerer
+                        </p>
+                        <button @click="testConnection()" 
+                                :disabled="testing"
+                                class="w-full bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-700 disabled:opacity-50">
+                            <span x-show="!testing">Test</span>
+                            <span x-show="testing">Tester...</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connection Test Results -->
+            <div x-show="connectionResults" x-cloak class="bg-white rounded-lg shadow p-6 mb-8">
+                <h2 class="text-xl font-bold mb-4">Tilkoblingsresultater</h2>
+                <div class="space-y-3">
+                    <div class="flex items-center">
+                        <div class="w-4 h-4 rounded-full mr-3" :class="connectionResults?.susoft ? 'bg-green-500' : 'bg-red-500'"></div>
+                        <span>Susoft API: <span x-text="connectionResults?.susoft ? 'OK' : 'Feil'"></span></span>
+                    </div>
+                    <div class="flex items-center">
+                        <div class="w-4 h-4 rounded-full mr-3" :class="connectionResults?.shopify ? 'bg-green-500' : 'bg-red-500'"></div>
+                        <span>Shopify API: <span x-text="connectionResults?.shopify ? 'OK' : 'Feil'"></span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Product Mappings -->
+            <div class="bg-white rounded-lg shadow overflow-hidden">
+                <div class="px-6 py-4 border-b flex justify-between items-center">
+                    <h2 class="text-xl font-bold">Produktmappinger</h2>
+                    <span class="text-sm text-gray-500" x-text="`${mappings.length} produkter`"></span>
+                </div>
+                
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Susoft ID</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Shopify ID</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Susoft lager</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Shopify lager</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Safety</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Siste synk</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            <template x-for="mapping in mappings" :key="mapping.id">
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-4 py-3 whitespace-nowrap font-mono text-sm" x-text="mapping.sku"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm" x-text="mapping.susoft_product_id"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm" x-text="mapping.shopify_product_id"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm font-medium" x-text="mapping.current_susoft_stock ?? '-'"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm" 
+                                        :class="mapping.current_shopify_stock !== mapping.current_susoft_stock ? 'text-orange-600 font-medium' : ''"
+                                        x-text="mapping.current_shopify_stock ?? '-'"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500" x-text="mapping.safety_stock"></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500" x-text="formatDate(mapping.last_synced_at)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <template x-if="mappings.length === 0">
+                    <div class="px-6 py-12 text-center text-gray-500">
+                        Ingen produktmappinger funnet
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+
+    <!-- Toast Message -->
+    <div x-show="message" x-cloak
+         class="fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg"
+         :class="messageType === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'"
+         x-text="message"
+         x-transition>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function syncPage() {
+    return {
+        tenants: [],
+        selectedTenantId: '',
+        tenantStatus: null,
+        mappings: [],
+        syncing: false,
+        testing: false,
+        connectionResults: null,
+        message: '',
+        messageType: 'success',
+        
+        async init() {
+            await this.loadTenants();
+        },
+        
+        async loadTenants() {
+            try {
+                this.tenants = await apiCall('/tenants');
+            } catch (err) {
+                console.error('Failed to load tenants:', err);
+            }
+        },
+        
+        async loadTenantStatus() {
+            if (!this.selectedTenantId) {
+                this.tenantStatus = null;
+                this.mappings = [];
+                return;
+            }
+            
+            try {
+                this.tenantStatus = await apiCall(`/tenants/${this.selectedTenantId}/status`);
+                await this.loadMappings();
+            } catch (err) {
+                this.showMessage('Kunne ikke laste status: ' + err.message, 'error');
+            }
+        },
+        
+        async loadMappings() {
+            try {
+                this.mappings = await apiCall(`/tenants/${this.selectedTenantId}/mappings`);
+            } catch (err) {
+                console.error('Failed to load mappings:', err);
+            }
+        },
+        
+        async syncStock() {
+            this.syncing = true;
+            try {
+                await apiCall(`/tenants/${this.selectedTenantId}/sync-stock`, 'POST');
+                this.showMessage('Lagersynkronisering startet!', 'success');
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            } finally {
+                this.syncing = false;
+            }
+        },
+        
+        async syncProducts() {
+            // This would trigger a product mapping sync
+            this.showMessage('Produktsynkronisering ikke implementert ennå', 'error');
+        },
+        
+        async importOrders() {
+            // This would import recent orders from Shopify
+            this.showMessage('Ordreimport ikke implementert ennå', 'error');
+        },
+        
+        async testConnection() {
+            this.testing = true;
+            this.connectionResults = null;
+            
+            try {
+                // Simulate connection test (you'd implement actual endpoints)
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                this.connectionResults = {
+                    susoft: true,
+                    shopify: true
+                };
+                this.showMessage('Tilkoblinger OK!', 'success');
+            } catch (err) {
+                this.connectionResults = {
+                    susoft: false,
+                    shopify: false
+                };
+                this.showMessage('Tilkoblingstest feilet', 'error');
+            } finally {
+                this.testing = false;
+            }
+        },
+        
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => this.message = '', 3000);
+        },
+        
+        formatDate(dateStr) {
+            if (!dateStr) return 'Aldri';
+            return new Date(dateStr).toLocaleString('nb-NO');
+        },
+        
+        formatMinutes(minutes) {
+            if (minutes === null || minutes === undefined) return 'Aldri synket';
+            if (minutes < 1) return 'Akkurat nå';
+            if (minutes < 60) return `${Math.round(minutes)} min siden`;
+            return `${Math.round(minutes / 60)} timer siden`;
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -21,8 +21,10 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import engine
+from app.core.logging_service import setup_portal_logging
 from app.api.webhooks import router as webhooks_router
 from app.api.admin import router as admin_router
+from app.admin_portal.router import router as portal_router
 
 
 # Configure structured logging
@@ -51,6 +53,8 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events.
     """
     # Startup
+    setup_portal_logging()  # Initialize portal logging
+    
     logger.info(
         "Application starting",
         environment=settings.environment,
@@ -109,6 +113,7 @@ app.add_middleware(
 # Include routers
 app.include_router(webhooks_router)
 app.include_router(admin_router)
+app.include_router(portal_router)
 
 
 # ===================

@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block title %}Innstillinger{% endblock %}
+
+{% block content %}
+<div x-data="settingsPage()" x-init="init()">
+    <!-- Header -->
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">Innstillinger</h1>
+        <p class="text-gray-600">Konfigurer systeminnstillinger og varsler</p>
+    </div>
+
+    <!-- Settings Sections -->
+    <div class="space-y-6">
+        <!-- API Key Settings -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-bold mb-4">🔐 Admin API Nøkkel</h2>
+            <p class="text-gray-600 mb-4">Endre admin API-nøkkelen som brukes for autentisering.</p>
+            
+            <div class="flex space-x-4">
+                <input type="password" x-model="newApiKey" placeholder="Ny API-nøkkel..." 
+                       class="flex-1 border rounded-lg px-4 py-2">
+                <button @click="updateApiKey()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">
+                    Oppdater
+                </button>
+            </div>
+            <p class="text-sm text-gray-500 mt-2">Nåværende nøkkel: ••••••••••••••••</p>
+        </div>
+
+        <!-- Notification Settings -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-bold mb-4">🔔 Varsler</h2>
+            
+            <div class="space-y-4">
+                <!-- Slack -->
+                <div class="border rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="font-medium">Slack</h3>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" x-model="notifications.slack.enabled" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                    </div>
+                    <div x-show="notifications.slack.enabled">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Webhook URL</label>
+                        <input type="url" x-model="notifications.slack.webhookUrl" 
+                               placeholder="https://hooks.slack.com/services/..."
+                               class="w-full border rounded-lg px-4 py-2">
+                    </div>
+                </div>
+
+                <!-- Email -->
+                <div class="border rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="font-medium">E-post</h3>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" x-model="notifications.email.enabled" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                    </div>
+                    <div x-show="notifications.email.enabled" class="space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Mottakere</label>
+                            <input type="text" x-model="notifications.email.recipients" 
+                                   placeholder="admin@example.com, tech@example.com"
+                                   class="w-full border rounded-lg px-4 py-2">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <h4 class="font-medium mb-2">Send varsler ved:</h4>
+                <div class="space-y-2">
+                    <label class="flex items-center">
+                        <input type="checkbox" x-model="notifications.events.syncFailure" class="rounded">
+                        <span class="ml-2">Synkroniseringsfeil</span>
+                    </label>
+                    <label class="flex items-center">
+                        <input type="checkbox" x-model="notifications.events.dlqItem" class="rounded">
+                        <span class="ml-2">Ny DLQ-oppføring</span>
+                    </label>
+                    <label class="flex items-center">
+                        <input type="checkbox" x-model="notifications.events.tenantUnhealthy" class="rounded">
+                        <span class="ml-2">Tenant blir uhealthy</span>
+                    </label>
+                    <label class="flex items-center">
+                        <input type="checkbox" x-model="notifications.events.dailySummary" class="rounded">
+                        <span class="ml-2">Daglig oppsumering (kl 08:00)</span>
+                    </label>
+                </div>
+            </div>
+            
+            <button @click="saveNotifications()" class="mt-4 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">
+                Lagre varselsinnstillinger
+            </button>
+        </div>
+
+        <!-- Sync Settings -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-bold mb-4">⚙️ Standardinnstillinger for synkronisering</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Standard synk-intervall (sekunder)</label>
+                    <input type="number" x-model="syncSettings.defaultInterval" class="w-full border rounded-lg px-4 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Standard safety stock</label>
+                    <input type="number" x-model="syncSettings.defaultSafetyStock" class="w-full border rounded-lg px-4 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Maks retry-forsøk</label>
+                    <input type="number" x-model="syncSettings.maxRetries" class="w-full border rounded-lg px-4 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Retry delay (sekunder)</label>
+                    <input type="number" x-model="syncSettings.retryDelay" class="w-full border rounded-lg px-4 py-2">
+                </div>
+            </div>
+            
+            <button @click="saveSyncSettings()" class="mt-4 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">
+                Lagre synk-innstillinger
+            </button>
+        </div>
+
+        <!-- System Info -->
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-bold mb-4">ℹ️ Systeminformasjon</h2>
+            
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <dt class="text-sm text-gray-500">Versjon</dt>
+                    <dd class="font-medium">1.0.0</dd>
+                </div>
+                <div>
+                    <dt class="text-sm text-gray-500">Miljø</dt>
+                    <dd class="font-medium" x-text="systemInfo.environment || 'development'"></dd>
+                </div>
+                <div>
+                    <dt class="text-sm text-gray-500">Database</dt>
+                    <dd class="font-medium text-green-600">Tilkoblet</dd>
+                </div>
+                <div>
+                    <dt class="text-sm text-gray-500">Redis/Celery</dt>
+                    <dd class="font-medium" :class="systemInfo.celeryConnected ? 'text-green-600' : 'text-red-600'"
+                        x-text="systemInfo.celeryConnected ? 'Tilkoblet' : 'Ikke tilkoblet'"></dd>
+                </div>
+            </dl>
+        </div>
+
+        <!-- Danger Zone -->
+        <div class="bg-red-50 border border-red-200 rounded-lg p-6">
+            <h2 class="text-lg font-bold text-red-800 mb-4">⚠️ Fareområde</h2>
+            
+            <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-medium text-red-800">Tøm DLQ</h3>
+                        <p class="text-sm text-red-600">Slett alle uløste feil fra køen</p>
+                    </div>
+                    <button @click="clearDLQ()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">
+                        Tøm DLQ
+                    </button>
+                </div>
+                
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-medium text-red-800">Tøm logger</h3>
+                        <p class="text-sm text-red-600">Slett alle synkroniseringslogger</p>
+                    </div>
+                    <button @click="clearLogs()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">
+                        Tøm logger
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div x-show="message" x-cloak
+         class="fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg"
+         :class="messageType === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'"
+         x-text="message"
+         x-transition>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function settingsPage() {
+    return {
+        newApiKey: '',
+        notifications: {
+            slack: { enabled: false, webhookUrl: '' },
+            email: { enabled: false, recipients: '' },
+            events: {
+                syncFailure: true,
+                dlqItem: true,
+                tenantUnhealthy: true,
+                dailySummary: false
+            }
+        },
+        syncSettings: {
+            defaultInterval: 300,
+            defaultSafetyStock: 0,
+            maxRetries: 3,
+            retryDelay: 60
+        },
+        systemInfo: {
+            environment: 'development',
+            celeryConnected: false
+        },
+        message: '',
+        messageType: 'success',
+        
+        init() {
+            // Load saved settings from localStorage (would be from API in production)
+            const saved = localStorage.getItem('settings');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                this.notifications = { ...this.notifications, ...parsed.notifications };
+                this.syncSettings = { ...this.syncSettings, ...parsed.syncSettings };
+            }
+        },
+        
+        updateApiKey() {
+            if (!this.newApiKey) return;
+            localStorage.setItem('admin_api_key', this.newApiKey);
+            this.newApiKey = '';
+            this.showMessage('API-nøkkel oppdatert!', 'success');
+        },
+        
+        saveNotifications() {
+            localStorage.setItem('settings', JSON.stringify({
+                notifications: this.notifications,
+                syncSettings: this.syncSettings
+            }));
+            this.showMessage('Varselsinnstillinger lagret!', 'success');
+        },
+        
+        saveSyncSettings() {
+            localStorage.setItem('settings', JSON.stringify({
+                notifications: this.notifications,
+                syncSettings: this.syncSettings
+            }));
+            this.showMessage('Synk-innstillinger lagret!', 'success');
+        },
+        
+        async clearDLQ() {
+            if (!confirm('Er du sikker på at du vil tømme hele DLQ? Dette kan ikke angres.')) return;
+            this.showMessage('DLQ-tømming ikke implementert ennå', 'error');
+        },
+        
+        async clearLogs() {
+            if (!confirm('Er du sikker på at du vil slette alle logger? Dette kan ikke angres.')) return;
+            this.showMessage('Logg-sletting ikke implementert ennå', 'error');
+        },
+        
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => this.message = '', 3000);
+        }
+    };
+}
+</script>
+{% endblock %}

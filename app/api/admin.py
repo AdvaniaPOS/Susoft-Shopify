@@ -602,3 +602,160 @@ async def admin_health():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+
+# ===================
+# Application Logs
+# ===================
+
+from app.core.logging_service import get_log_buffer, get_file_writer, LogLevel
+
+
+class AppLogResponse(BaseModel):
+    """Response model for application log entry."""
+    timestamp: str
+    level: str
+    message: str
+    logger_name: str
+    tenant_id: Optional[str] = None
+    extra: Optional[dict] = None
+    traceback: Optional[str] = None
+
+
+@router.get("/app-logs", response_model=List[AppLogResponse])
+async def get_application_logs(
+    limit: int = Query(default=100, le=500),
+    level: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    search: Optional[str] = None,
+    _: bool = Depends(verify_admin_key)
+):
+    """
+    Get recent application logs from memory buffer.
+    
+    These are real-time logs from the running application.
+    """
+    buffer = get_log_buffer()
+    
+    log_level = LogLevel(level) if level else None
+    entries = await buffer.get_recent(
+        limit=limit,
+        level=log_level,
+        tenant_id=tenant_id,
+        search=search
+    )
+    
+    return [
+        AppLogResponse(
+            timestamp=e.timestamp,
+            level=e.level,
+            message=e.message,
+            logger_name=e.logger_name,
+            tenant_id=e.tenant_id,
+            extra=e.extra,
+            traceback=e.traceback
+        )
+        for e in entries
+    ]
+
+
+@router.get("/app-logs/dates")
+async def get_log_dates(
+    _: bool = Depends(verify_admin_key)
+):
+    """Get list of dates with available log files."""
+    writer = get_file_writer()
+    dates = writer.get_available_dates()
+    return {"dates": dates}
+
+
+@router.get("/app-logs/file/{date}", response_model=List[AppLogResponse])
+async def get_logs_from_file(
+    date: str,
+    limit: int = Query(default=500, le=2000),
+    _: bool = Depends(verify_admin_key)
+):
+    """
+    Get logs from a specific date's log file.
+    
+    Date format: YYYY-MM-DD
+    """
+    writer = get_file_writer()
+    entries = await writer.read_logs(date=date, limit=limit)
+    
+    return [
+        AppLogResponse(
+            timestamp=e.timestamp,
+            level=e.level,
+            message=e.message,
+            logger_name=e.logger_name,
+            tenant_id=e.tenant_id,
+            extra=e.extra,
+            traceback=e.traceback
+        )
+        for e in entries
+    ]
+
+
+# ===================
+# Connection Testing
+# ===================
+
+
+class ConnectionTestResult(BaseModel):
+    """Result of a connection test."""
+    susoft_connected: bool
+    susoft_error: Optional[str] = None
+    shopify_connected: bool
+    shopify_error: Optional[str] = None
+    tested_at: str
+
+
+@router.post("/tenants/{tenant_id}/test-connection", response_model=ConnectionTestResult)
+async def test_tenant_connections(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key)
+):
+    """
+    Test Susoft and Shopify API connections for a tenant.
+    """
+    from app.services.susoft_client import SusoftClient
+    from app.services.shopify_client import ShopifyClient
+    from app.core.security import decrypt_credential
+    
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    result = ConnectionTestResult(
+        susoft_connected=False,
+        shopify_connected=False,
+        tested_at=datetime.now(timezone.utc).isoformat()
+    )
+    
+    # Test Susoft
+    try:
+        susoft_client = SusoftClient(
+            base_url=tenant.susoft_api_url,
+            api_key=decrypt_credential(tenant.susoft_api_key_encrypted)
+        )
+        await susoft_client.health_check()
+        result.susoft_connected = True
+    except Exception as e:
+        result.susoft_error = str(e)
+    
+    # Test Shopify
+    try:
+        shopify_client = ShopifyClient(
+            shop_url=tenant.shopify_shop_url,
+            access_token=decrypt_credential(tenant.shopify_access_token_encrypted)
+        )
+        await shopify_client.health_check()
+        result.shopify_connected = True
+    except Exception as e:
+        result.shopify_error = str(e)
+    
+    return result

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+
+{% block title %}Tenants{% endblock %}
+
+{% block content %}
+<div x-data="tenantsPage()" x-init="init()">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold text-gray-900">Tenants</h1>
+            <p class="text-gray-600">Administrer integrasjoner</p>
+        </div>
+        <button @click="showCreateModal = true" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">
+            + Ny Tenant
+        </button>
+    </div>
+
+    <!-- Tenants Table -->
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Navn</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Shopify</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Susoft</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Siste synk</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Handlinger</th>
+                </tr>
+            </thead>
+            <tbody class="bg-white divide-y divide-gray-200">
+                <template x-for="tenant in tenants" :key="tenant.id">
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                                  :class="tenant.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'">
+                                <span x-text="tenant.is_active ? 'Aktiv' : 'Inaktiv'"></span>
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="font-medium text-gray-900" x-text="tenant.name"></div>
+                            <div class="text-sm text-gray-500" x-text="tenant.id"></div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-900" x-text="tenant.shopify_shop_url"></div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-900" x-text="tenant.susoft_api_url"></div>
+                            <div class="text-sm text-gray-500" x-text="`ID: ${tenant.susoft_integration_id}`"></div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            <div x-text="formatDate(tenant.last_sync_at)"></div>
+                            <div class="text-xs" x-text="formatDate(tenant.last_stock_sync_at) ? `Lager: ${formatDate(tenant.last_stock_sync_at)}` : ''"></div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                            <button @click="viewTenant(tenant)" class="text-indigo-600 hover:text-indigo-900">
+                                Vis
+                            </button>
+                            <button @click="toggleActive(tenant)" class="text-yellow-600 hover:text-yellow-900"
+                                    x-text="tenant.is_active ? 'Deaktiver' : 'Aktiver'">
+                            </button>
+                            <button @click="triggerSync(tenant)" class="text-green-600 hover:text-green-900">
+                                Synk
+                            </button>
+                        </td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Create Tenant Modal -->
+    <div x-show="showCreateModal" x-cloak class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-8 max-w-2xl w-full mx-4 max-h-screen overflow-y-auto" @click.away="showCreateModal = false">
+            <h2 class="text-2xl font-bold mb-6">Ny Tenant</h2>
+            
+            <form @submit.prevent="createTenant()">
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Navn</label>
+                        <input type="text" x-model="newTenant.name" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    
+                    <div class="col-span-2 border-t pt-4 mt-2">
+                        <h3 class="font-medium mb-2">Susoft Innstillinger</h3>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">API URL</label>
+                        <input type="url" x-model="newTenant.susoft_api_url" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Integration ID</label>
+                        <input type="text" x-model="newTenant.susoft_integration_id" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                        <input type="password" x-model="newTenant.susoft_api_key" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Webhook Secret</label>
+                        <input type="password" x-model="newTenant.susoft_webhook_secret" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    
+                    <div class="col-span-2 border-t pt-4 mt-2">
+                        <h3 class="font-medium mb-2">Shopify Innstillinger</h3>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Shop URL</label>
+                        <input type="text" x-model="newTenant.shopify_shop_url" placeholder="myshop.myshopify.com" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
+                        <input type="password" x-model="newTenant.shopify_access_token" class="w-full border rounded-lg px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Location ID (valgfri)</label>
+                        <input type="text" x-model="newTenant.shopify_default_location_id" class="w-full border rounded-lg px-4 py-2">
+                    </div>
+                    
+                    <div class="col-span-2 border-t pt-4 mt-2">
+                        <h3 class="font-medium mb-2">Synkronisering</h3>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Sync Intervall (sekunder)</label>
+                        <input type="number" x-model="newTenant.sync_interval_seconds" class="w-full border rounded-lg px-4 py-2">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Safety Stock</label>
+                        <input type="number" x-model="newTenant.safety_stock_default" class="w-full border rounded-lg px-4 py-2">
+                    </div>
+                </div>
+                
+                <div class="flex justify-end space-x-4 mt-6">
+                    <button type="button" @click="showCreateModal = false" class="px-4 py-2 border rounded-lg hover:bg-gray-50">
+                        Avbryt
+                    </button>
+                    <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                        Opprett
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Status Messages -->
+    <div x-show="message" x-cloak
+         class="fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg"
+         :class="messageType === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'"
+         x-text="message"
+         x-transition>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function tenantsPage() {
+    return {
+        tenants: [],
+        showCreateModal: false,
+        message: '',
+        messageType: 'success',
+        newTenant: {
+            name: '',
+            susoft_api_url: '',
+            susoft_api_key: '',
+            susoft_integration_id: '',
+            susoft_webhook_secret: '',
+            shopify_shop_url: '',
+            shopify_access_token: '',
+            shopify_default_location_id: '',
+            sync_interval_seconds: 300,
+            safety_stock_default: 0
+        },
+        
+        async init() {
+            await this.loadTenants();
+        },
+        
+        async loadTenants() {
+            try {
+                this.tenants = await apiCall('/tenants?include_inactive=true');
+            } catch (err) {
+                this.showMessage('Kunne ikke laste tenants: ' + err.message, 'error');
+            }
+        },
+        
+        async createTenant() {
+            try {
+                await apiCall('/tenants', 'POST', this.newTenant);
+                this.showMessage('Tenant opprettet!', 'success');
+                this.showCreateModal = false;
+                this.resetNewTenant();
+                await this.loadTenants();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        async toggleActive(tenant) {
+            const endpoint = tenant.is_active ? 'deactivate' : 'activate';
+            try {
+                await apiCall(`/tenants/${tenant.id}/${endpoint}`, 'PATCH');
+                this.showMessage(`Tenant ${endpoint === 'activate' ? 'aktivert' : 'deaktivert'}`, 'success');
+                await this.loadTenants();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        async triggerSync(tenant) {
+            try {
+                await apiCall(`/tenants/${tenant.id}/sync-stock`, 'POST');
+                this.showMessage('Synkronisering startet!', 'success');
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        viewTenant(tenant) {
+            window.location.href = `/portal/tenants/${tenant.id}`;
+        },
+        
+        resetNewTenant() {
+            this.newTenant = {
+                name: '',
+                susoft_api_url: '',
+                susoft_api_key: '',
+                susoft_integration_id: '',
+                susoft_webhook_secret: '',
+                shopify_shop_url: '',
+                shopify_access_token: '',
+                shopify_default_location_id: '',
+                sync_interval_seconds: 300,
+                safety_stock_default: 0
+            };
+        },
+        
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => this.message = '', 3000);
+        },
+        
+        formatDate(dateStr) {
+            if (!dateStr) return 'Aldri';
+            return new Date(dateStr).toLocaleString('nb-NO');
+        }
+    };
+}
+</script>
+{% endblock %}

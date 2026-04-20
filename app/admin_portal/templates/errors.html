@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}Feil (DLQ){% endblock %}
+
+{% block content %}
+<div x-data="errorsPage()" x-init="init()">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold text-gray-900">Feil (Dead Letter Queue)</h1>
+            <p class="text-gray-600">Feilede operasjoner som krever manuell behandling</p>
+        </div>
+        <div class="flex space-x-2">
+            <button @click="loadErrors()" class="bg-white border px-4 py-2 rounded-lg hover:bg-gray-50">
+                🔄 Oppdater
+            </button>
+            <button @click="retryAll()" 
+                    :disabled="errors.filter(e => !e.resolved).length === 0"
+                    class="bg-yellow-600 text-white px-4 py-2 rounded-lg hover:bg-yellow-700 disabled:opacity-50">
+                🔄 Prøv alle på nytt
+            </button>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center">
+                <div class="p-3 rounded-full bg-red-100 text-red-600">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                    </svg>
+                </div>
+                <div class="ml-4">
+                    <p class="text-gray-500 text-sm">Totalt</p>
+                    <p class="text-2xl font-bold" x-text="stats.total"></p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center">
+                <div class="p-3 rounded-full bg-orange-100 text-orange-600">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                </div>
+                <div class="ml-4">
+                    <p class="text-gray-500 text-sm">Uløst</p>
+                    <p class="text-2xl font-bold text-orange-600" x-text="stats.unresolved"></p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center">
+                <div class="p-3 rounded-full bg-green-100 text-green-600">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                </div>
+                <div class="ml-4">
+                    <p class="text-gray-500 text-sm">Løst</p>
+                    <p class="text-2xl font-bold text-green-600" x-text="stats.resolved"></p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center">
+                <div class="p-3 rounded-full bg-blue-100 text-blue-600">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                </div>
+                <div class="ml-4">
+                    <p class="text-gray-500 text-sm">Maks forsøk</p>
+                    <p class="text-2xl font-bold" x-text="stats.maxRetries"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filter -->
+    <div class="bg-white rounded-lg shadow p-4 mb-6">
+        <div class="flex space-x-4">
+            <label class="inline-flex items-center">
+                <input type="checkbox" x-model="showResolved" @change="loadErrors()" class="rounded border-gray-300">
+                <span class="ml-2 text-sm text-gray-600">Vis løste</span>
+            </label>
+            <select x-model="filters.tenantId" @change="loadErrors()" class="border rounded-lg px-3 py-1 text-sm">
+                <option value="">Alle tenants</option>
+                <template x-for="tenant in tenants" :key="tenant.id">
+                    <option :value="tenant.id" x-text="tenant.name"></option>
+                </template>
+            </select>
+        </div>
+    </div>
+
+    <!-- Errors List -->
+    <div class="space-y-4">
+        <template x-for="error in errors" :key="error.id">
+            <div class="bg-white rounded-lg shadow overflow-hidden" 
+                 :class="error.resolved ? 'opacity-60' : ''">
+                <div class="p-6">
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1">
+                            <div class="flex items-center space-x-2 mb-2">
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                                      :class="error.resolved ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'">
+                                    <span x-text="error.resolved ? 'Løst' : 'Uløst'"></span>
+                                </span>
+                                <span class="text-sm text-gray-500">
+                                    Forsøk: <span x-text="error.retry_count"></span>
+                                </span>
+                                <span class="text-sm text-gray-500">
+                                    | <span x-text="error.task_name"></span>
+                                </span>
+                            </div>
+                            
+                            <div class="bg-red-50 border border-red-200 rounded p-3 mb-4">
+                                <p class="text-sm text-red-800 font-mono whitespace-pre-wrap" x-text="error.error_message"></p>
+                            </div>
+                            
+                            <div class="flex items-center text-sm text-gray-500 space-x-4">
+                                <span>
+                                    Opprettet: <span x-text="formatDate(error.created_at)"></span>
+                                </span>
+                                <span x-show="error.last_retry_at">
+                                    Siste forsøk: <span x-text="formatDate(error.last_retry_at)"></span>
+                                </span>
+                            </div>
+                        </div>
+                        
+                        <div class="flex space-x-2 ml-4">
+                            <template x-if="!error.resolved">
+                                <button @click="retryError(error)" 
+                                        class="bg-yellow-100 text-yellow-700 px-3 py-2 rounded-lg hover:bg-yellow-200 text-sm">
+                                    🔄 Prøv på nytt
+                                </button>
+                            </template>
+                            <template x-if="!error.resolved">
+                                <button @click="resolveError(error)"
+                                        class="bg-green-100 text-green-700 px-3 py-2 rounded-lg hover:bg-green-200 text-sm">
+                                    ✓ Merk som løst
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <template x-if="errors.length === 0">
+            <div class="bg-white rounded-lg shadow p-12 text-center">
+                <div class="text-6xl mb-4">🎉</div>
+                <h3 class="text-xl font-medium text-gray-900 mb-2">Ingen feil!</h3>
+                <p class="text-gray-500">Alt kjører som det skal.</p>
+            </div>
+        </template>
+    </div>
+
+    <!-- Toast Message -->
+    <div x-show="message" x-cloak
+         class="fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg"
+         :class="messageType === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'"
+         x-text="message"
+         x-transition>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function errorsPage() {
+    return {
+        errors: [],
+        tenants: [],
+        showResolved: false,
+        message: '',
+        messageType: 'success',
+        filters: {
+            tenantId: ''
+        },
+        stats: {
+            total: 0,
+            unresolved: 0,
+            resolved: 0,
+            maxRetries: 0
+        },
+        
+        async init() {
+            await this.loadTenants();
+            await this.loadErrors();
+        },
+        
+        async loadTenants() {
+            try {
+                this.tenants = await apiCall('/tenants');
+            } catch (err) {
+                console.error('Failed to load tenants:', err);
+            }
+        },
+        
+        async loadErrors() {
+            try {
+                let url = `/dlq?unresolved_only=${!this.showResolved}&limit=100`;
+                if (this.filters.tenantId) {
+                    url += `&tenant_id=${this.filters.tenantId}`;
+                }
+                
+                this.errors = await apiCall(url);
+                this.updateStats();
+            } catch (err) {
+                console.error('Failed to load errors:', err);
+            }
+        },
+        
+        updateStats() {
+            this.stats = {
+                total: this.errors.length,
+                unresolved: this.errors.filter(e => !e.resolved).length,
+                resolved: this.errors.filter(e => e.resolved).length,
+                maxRetries: this.errors.filter(e => e.retry_count >= 3).length
+            };
+        },
+        
+        async retryError(error) {
+            try {
+                await apiCall(`/dlq/${error.id}/retry`, 'POST');
+                this.showMessage('Ny forsøk lagt i kø!', 'success');
+                await this.loadErrors();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        async resolveError(error) {
+            if (!confirm('Er du sikker på at du vil markere denne som løst?')) return;
+            
+            try {
+                await apiCall(`/dlq/${error.id}/resolve`, 'POST');
+                this.showMessage('Markert som løst!', 'success');
+                await this.loadErrors();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        async retryAll() {
+            if (!confirm('Vil du prøve alle uløste feil på nytt?')) return;
+            
+            const unresolved = this.errors.filter(e => !e.resolved);
+            let success = 0;
+            let failed = 0;
+            
+            for (const error of unresolved) {
+                try {
+                    await apiCall(`/dlq/${error.id}/retry`, 'POST');
+                    success++;
+                } catch (err) {
+                    failed++;
+                }
+            }
+            
+            this.showMessage(`${success} lagt i kø, ${failed} feilet`, success > failed ? 'success' : 'error');
+            await this.loadErrors();
+        },
+        
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => this.message = '', 3000);
+        },
+        
+        formatDate(dateStr) {
+            if (!dateStr) return '-';
+            return new Date(dateStr).toLocaleString('nb-NO');
+        }
+    };
+}
+</script>
+{% endblock %}

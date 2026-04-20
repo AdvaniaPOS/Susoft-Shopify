@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Tenant Detaljer{% endblock %}
+
+{% block content %}
+<div x-data="tenantDetail('{{ tenant_id }}')" x-init="init()">
+    <!-- Back button -->
+    <div class="mb-6">
+        <a href="/portal/tenants" class="text-indigo-600 hover:text-indigo-800">
+            ← Tilbake til tenants
+        </a>
+    </div>
+
+    <template x-if="tenant">
+        <div>
+            <!-- Tenant Header -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="flex items-center space-x-3">
+                            <h1 class="text-3xl font-bold text-gray-900" x-text="tenant.name"></h1>
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                                  :class="tenant.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'">
+                                <span x-text="tenant.is_active ? 'Aktiv' : 'Inaktiv'"></span>
+                            </span>
+                        </div>
+                        <p class="text-gray-500 mt-1" x-text="tenant.id"></p>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button @click="toggleActive()" 
+                                class="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                                x-text="tenant.is_active ? 'Deaktiver' : 'Aktiver'">
+                        </button>
+                        <button @click="triggerSync()"
+                                class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                            🔄 Synkroniser
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connection Info -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <!-- Shopify -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h2 class="text-lg font-bold mb-4 flex items-center">
+                        <span class="mr-2">🛒</span> Shopify
+                    </h2>
+                    <dl class="space-y-3">
+                        <div>
+                            <dt class="text-sm text-gray-500">Shop URL</dt>
+                            <dd class="font-medium" x-text="tenant.shopify_shop_url"></dd>
+                        </div>
+                        <div>
+                            <dt class="text-sm text-gray-500">Location ID</dt>
+                            <dd x-text="tenant.shopify_default_location_id || 'Ikke satt'"></dd>
+                        </div>
+                    </dl>
+                </div>
+                
+                <!-- Susoft -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h2 class="text-lg font-bold mb-4 flex items-center">
+                        <span class="mr-2">📊</span> Susoft
+                    </h2>
+                    <dl class="space-y-3">
+                        <div>
+                            <dt class="text-sm text-gray-500">API URL</dt>
+                            <dd class="font-medium" x-text="tenant.susoft_api_url"></dd>
+                        </div>
+                        <div>
+                            <dt class="text-sm text-gray-500">Integration ID</dt>
+                            <dd x-text="tenant.susoft_integration_id"></dd>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+            <!-- Sync Status -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-lg font-bold mb-4">Synkroniseringsstatus</h2>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="text-center p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-500">Siste synk</p>
+                        <p class="font-medium" x-text="formatDate(tenant.last_sync_at)"></p>
+                    </div>
+                    <div class="text-center p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-500">Siste ordresynk</p>
+                        <p class="font-medium" x-text="formatDate(tenant.last_order_sync_at)"></p>
+                    </div>
+                    <div class="text-center p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-500">Siste lagersynk</p>
+                        <p class="font-medium" x-text="formatDate(tenant.last_stock_sync_at)"></p>
+                    </div>
+                    <div class="text-center p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-500">Intervall</p>
+                        <p class="font-medium" x-text="`${tenant.sync_interval_seconds}s`"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-lg font-bold mb-4">Innstillinger</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Safety Stock (standard)</label>
+                        <input type="number" x-model="tenant.safety_stock_default" 
+                               class="w-full border rounded-lg px-4 py-2" disabled>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Sync Intervall (sekunder)</label>
+                        <input type="number" x-model="tenant.sync_interval_seconds"
+                               class="w-full border rounded-lg px-4 py-2" disabled>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Logs -->
+            <div class="bg-white rounded-lg shadow overflow-hidden">
+                <div class="px-6 py-4 border-b flex justify-between items-center">
+                    <h2 class="text-lg font-bold">Siste logger</h2>
+                    <a :href="`/portal/logs?tenant=${tenant.id}`" class="text-indigo-600 hover:text-indigo-800 text-sm">
+                        Se alle →
+                    </a>
+                </div>
+                <div class="divide-y max-h-96 overflow-y-auto">
+                    <template x-for="log in recentLogs" :key="log.id">
+                        <div class="px-6 py-3 flex items-center justify-between">
+                            <div class="flex items-center">
+                                <div class="w-2 h-2 rounded-full mr-3" :class="{
+                                    'bg-green-500': log.status === 'completed',
+                                    'bg-yellow-500': log.status === 'pending',
+                                    'bg-red-500': log.status === 'failed'
+                                }"></div>
+                                <div>
+                                    <p class="text-sm">
+                                        <span class="font-medium" x-text="log.sync_type"></span>
+                                        <span class="text-gray-500" x-text="log.direction"></span>
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-xs text-gray-500" x-text="formatDate(log.created_at)"></p>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Loading -->
+    <template x-if="!tenant && loading">
+        <div class="text-center py-12">
+            <p class="text-gray-500">Laster...</p>
+        </div>
+    </template>
+
+    <!-- Toast -->
+    <div x-show="message" x-cloak
+         class="fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg"
+         :class="messageType === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'"
+         x-text="message"
+         x-transition>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function tenantDetail(tenantId) {
+    return {
+        tenant: null,
+        recentLogs: [],
+        loading: true,
+        message: '',
+        messageType: 'success',
+        
+        async init() {
+            await this.loadTenant();
+            await this.loadLogs();
+            this.loading = false;
+        },
+        
+        async loadTenant() {
+            try {
+                this.tenant = await apiCall(`/tenants/${tenantId}`);
+            } catch (err) {
+                this.showMessage('Kunne ikke laste tenant: ' + err.message, 'error');
+            }
+        },
+        
+        async loadLogs() {
+            try {
+                this.recentLogs = await apiCall(`/tenants/${tenantId}/sync-logs?limit=10`);
+            } catch (err) {
+                console.error('Failed to load logs:', err);
+            }
+        },
+        
+        async toggleActive() {
+            const endpoint = this.tenant.is_active ? 'deactivate' : 'activate';
+            try {
+                await apiCall(`/tenants/${tenantId}/${endpoint}`, 'PATCH');
+                this.showMessage(endpoint === 'activate' ? 'Tenant aktivert' : 'Tenant deaktivert', 'success');
+                await this.loadTenant();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        async triggerSync() {
+            try {
+                await apiCall(`/tenants/${tenantId}/sync-stock`, 'POST');
+                this.showMessage('Synkronisering startet!', 'success');
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+        
+        showMessage(msg, type) {
+            this.message = msg;
+            this.messageType = type;
+            setTimeout(() => this.message = '', 3000);
+        },
+        
+        formatDate(dateStr) {
+            if (!dateStr) return 'Aldri';
+            return new Date(dateStr).toLocaleString('nb-NO');
+        }
+    };
+}
+</script>
+{% endblock %}

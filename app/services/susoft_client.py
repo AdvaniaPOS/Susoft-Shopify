@@ -306,9 +306,12 @@ class SusoftClient:
                 )
             
             if response.status_code >= 400:
-                error_body = response.json() if response.content else {}
+                try:
+                    error_body = response.json() if response.content else {}
+                except Exception:
+                    error_body = response.text if response.content else ""
                 raise SusoftAPIError(
-                    f"API error: {response.status_code}",
+                    f"API error: {response.status_code} body={error_body}",
                     status_code=response.status_code,
                     response_body=error_body
                 )
@@ -592,12 +595,32 @@ class SusoftClient:
             has_payments=has_payments,
         )
 
-        return await self._request(
-            "POST",
-            endpoint,
-            params=params,
-            json_data=order_data,
-        )
+        try:
+            return await self._request(
+                "POST",
+                endpoint,
+                params=params,
+                json_data=order_data,
+            )
+        except SusoftAPIError as exc:
+            # /order/pos is strict and may return 500 for fields it doesn't
+            # like. Fall back to /order so we don't lose the order entirely.
+            # Stock won't be deducted automatically in this case, but the
+            # order will at least exist in Susoft for manual processing.
+            if use_pos_endpoint and endpoint == "/order/pos":
+                logger.warning(
+                    "/order/pos failed, falling back to /order",
+                    shopify_order_id=shopify_order_id,
+                    error=str(exc),
+                )
+                order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
+                return await self._request(
+                    "POST",
+                    "/order",
+                    params={"recalculate": str(recalculate).lower()},
+                    json_data=order_data,
+                )
+            raise
     
     async def get_order_by_alternative_id(self, alt_id: str) -> Optional[Dict[str, Any]]:
         """

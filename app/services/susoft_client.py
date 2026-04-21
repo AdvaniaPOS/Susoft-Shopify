@@ -451,6 +451,8 @@ class SusoftClient:
         epoch = datetime(1970, 1, 1)
         all_products: List[Dict[str, Any]] = []
         page = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 5
         while page < max_pages:
             try:
                 batch = await self.get_products_modified_since(
@@ -458,18 +460,29 @@ class SusoftClient:
                     page=page,
                     page_size=page_size,
                 )
+                consecutive_failures = 0
             except SusoftAPIError as e:
-                # Susoft's /product/list/modified sometimes returns HTTP 500
-                # on the page just past the last real page. Treat as end of
-                # pagination if we already collected some products.
-                if e.status_code == 500 and all_products:
+                # Some Susoft tenants have "poison" pages that return 500/429
+                # for specific products. Skip and keep paging; only give up
+                # after many consecutive failures.
+                if e.status_code in (429, 500, 502, 503, 504):
+                    consecutive_failures += 1
                     logger.warning(
-                        "Susoft returned 500 on product list pagination; "
-                        "treating as end of results",
+                        "Susoft product list page failed; skipping",
                         page=page,
+                        status=e.status_code,
+                        consecutive_failures=consecutive_failures,
                         collected=len(all_products),
                     )
-                    break
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.warning(
+                            "Too many consecutive failures; stopping pagination",
+                            page=page,
+                            collected=len(all_products),
+                        )
+                        break
+                    page += 1
+                    continue
                 raise
             if not batch:
                 break

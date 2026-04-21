@@ -618,6 +618,7 @@ async def _build_susoft_order(
 
     # Build line items (per Susoft OrderLine schema: nested `product`, `text`, no `sku`/`productUuid`)
     lines = []
+    next_line_no = 1
     for item in order_data.get("line_items", []):
         sku = item.get("sku")
 
@@ -645,17 +646,20 @@ async def _build_susoft_order(
         line_discount = _parse_float(item.get("total_discount", 0))
         line_total = round(unit_price * qty - line_discount, 2)
         lines.append({
+            "lineNo": next_line_no,
             "product": product_ref,
             "barcode": sku,
             "quantity": qty,
             "qtyOrdered": qty,
             "qtyDelivered": qty,
+            "producedQty": qty,
             "unitPrice": unit_price,
             "price": unit_price,
             "total": line_total,
             "discountAmount": line_discount,
             "text": item.get("name"),
         })
+        next_line_no += 1
 
     # Susoft API currently ignores shippingAmount/shippingName on create,
     # so we optionally model shipping as an explicit order line instead.
@@ -686,19 +690,24 @@ async def _build_susoft_order(
             )
 
         lines.append({
+            "lineNo": next_line_no,
             "product": shipping_product,
             "barcode": shipping_sku,
             "quantity": 1,
             "qtyOrdered": 1,
             "qtyDelivered": 1,
+            "producedQty": 1,
             "unitPrice": shipping_amount,
             "price": shipping_amount,
             "total": shipping_amount,
             "text": shipping_name or "Frakt",
         })
+        next_line_no += 1
     
     # Build the order (per Susoft Order schema)
     susoft_order = {
+        "shopId": susoft_shop_id,
+        "orderDateTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
         "customer": susoft_customer,
         "deliveryAddress": susoft_address,
         "invoiceAddress": susoft_address,

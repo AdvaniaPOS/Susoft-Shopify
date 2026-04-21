@@ -541,37 +541,62 @@ class SusoftClient:
         self,
         order_data: Dict[str, Any],
         shopify_order_id: str,
-        recalculate: bool = False
+        recalculate: bool = True,
+        use_pos_endpoint: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Create a new order in Susoft.
-        
-        Uses alternativeId and uuid for idempotency - Susoft will reject
-        duplicate orders with the same IDs.
-        
+
+        Uses alternativeId/uuid for idempotency - Susoft will reject duplicate
+        orders with the same IDs.
+
+        For paid orders we POST to ``/order/pos`` which behaves like an aPOS
+        sale - Susoft deducts stock immediately. ``/order`` creates an order
+        that waits for invoicing and does NOT deduct stock until invoiced.
+
         Args:
-            order_data: Order data following Susoft Order schema
-            shopify_order_id: Shopify order ID (used for idempotency)
-            recalculate: Whether to recalculate prices server-side
-            
+            order_data: Order data following Susoft Order schema.
+            shopify_order_id: Shopify order ID (used for idempotency).
+            recalculate: Whether to recalculate prices/stock movements
+                server-side. Default True so Susoft fills missing fields.
+            use_pos_endpoint: If True -> /order/pos. If False -> /order.
+                If None, auto-select based on presence of payments in
+                ``order_data`` (paid order -> POS endpoint).
+
         Returns:
             Created order data
         """
         # Set idempotency fields
         order_data["alternativeId"] = f"SHOPIFY-{shopify_order_id}"
-        order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
-        
+        # /order/pos rejects user-provided uuid; only set on /order
+        has_payments = bool(order_data.get("payments"))
+
+        if use_pos_endpoint is None:
+            use_pos_endpoint = has_payments
+
+        if use_pos_endpoint:
+            endpoint = "/order/pos"
+            params: Dict[str, Any] = {}
+            # /order/pos doesn't accept uuid in body
+            order_data.pop("uuid", None)
+        else:
+            endpoint = "/order"
+            order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
+            params = {"recalculate": str(recalculate).lower()}
+
         logger.info(
             "Creating order in Susoft",
             shopify_order_id=shopify_order_id,
-            alternative_id=order_data["alternativeId"]
+            alternative_id=order_data["alternativeId"],
+            endpoint=endpoint,
+            has_payments=has_payments,
         )
-        
+
         return await self._request(
             "POST",
-            "/order",
-            params={"recalculate": str(recalculate).lower()},
-            json_data=order_data
+            endpoint,
+            params=params,
+            json_data=order_data,
         )
     
     async def get_order_by_alternative_id(self, alt_id: str) -> Optional[Dict[str, Any]]:

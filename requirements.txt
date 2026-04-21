@@ -4,6 +4,8 @@ uvicorn[standard]==0.27.1
 pydantic==2.6.1
 pydantic-settings==2.2.1
 jinja2==3.1.3
+itsdangerous==2.1.2  # Required by starlette SessionMiddleware
+python-multipart==0.0.9  # Required for form-encoded login posts
 
 # Database
 sqlalchemy[asyncio]==2.0.27

@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field, field_validator
 import structlog
@@ -69,9 +69,19 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 async def verify_admin_key(
-    x_admin_api_key: str = Header(None)
+    request: Request,
+    x_admin_api_key: str = Header(None),
 ) -> bool:
-    """Verify admin API key from header."""
+    """Verify admin access via either an X-Admin-Api-Key header or a valid
+    portal session cookie set by /portal/login."""
+    # Allow access if a portal session is present (browser users via /portal)
+    try:
+        session = request.session  # provided by SessionMiddleware
+    except AssertionError:
+        session = None
+    if session and session.get("portal_user"):
+        return True
+
     configured = settings.admin_api_key
     if configured is None:
         raise HTTPException(

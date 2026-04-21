@@ -53,7 +53,12 @@
                 </div>
                 <div class="flex items-center">
                     <span id="clock" class="text-white text-sm mr-4"></span>
-                    <span class="text-indigo-200 text-sm">v1.0.0</span>
+                    <span class="text-indigo-200 text-sm mr-4">v1.0.0</span>
+                    <form method="post" action="/portal/logout" class="inline">
+                        <button type="submit" class="text-white hover:bg-indigo-500 px-3 py-2 rounded-md text-sm font-medium">
+                            Logg ut
+                        </button>
+                    </form>
                 </div>
             </div>
         </div>
@@ -82,29 +87,26 @@
         updateClock();
         setInterval(updateClock, 1000);
 
-        // API helper
-        const API_KEY = localStorage.getItem('admin_api_key') || '';
-        
+        // API helper - uses the portal session cookie set at /portal/login.
+        // No API key in the browser; the server attaches admin auth.
         async function apiCall(endpoint, method = 'GET', body = null) {
             const options = {
                 method,
+                credentials: 'same-origin',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-Admin-Api-Key': API_KEY
+                    'Content-Type': 'application/json'
                 }
             };
             if (body) {
                 options.body = JSON.stringify(body);
             }
             const response = await fetch(`/admin${endpoint}`, options);
+            if (response.status === 401 || response.status === 403) {
+                window.location.href = '/portal/login?next=' + encodeURIComponent(window.location.pathname);
+                throw new Error('Not authenticated');
+            }
             if (!response.ok) throw new Error(await response.text());
             return response.json();
-        }
-
-        // Set API key
-        function setApiKey(key) {
-            localStorage.setItem('admin_api_key', key);
-            location.reload();
         }
     </script>
     

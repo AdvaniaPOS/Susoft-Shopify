@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logg inn - Susoft-Shopify Sync</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+    <div class="max-w-md w-full bg-white rounded-lg shadow-lg p-8">
+        <div class="text-center mb-6">
+            <h1 class="text-2xl font-bold text-gray-800">🔄 Susoft-Shopify Sync</h1>
+            <p class="text-gray-500 text-sm mt-1">Admin Portal</p>
+        </div>
+
+        {% if error %}
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4 text-sm">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="post" action="/portal/login" class="space-y-4">
+            <input type="hidden" name="next" value="{{ next }}">
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="username">Brukernavn</label>
+                <input id="username" name="username" type="text" autocomplete="username" required autofocus
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="password">Passord</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            </div>
+
+            <button type="submit"
+                    class="w-full bg-indigo-600 text-white font-medium py-2 rounded-md hover:bg-indigo-700">
+                Logg inn
+            </button>
+        </form>
+
+        <p class="text-center text-xs text-gray-400 mt-6">&copy; 2024 Advania</p>
+    </div>
+</body>
+</html>

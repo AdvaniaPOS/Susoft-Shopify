@@ -18,6 +18,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.core.config import settings
 from app.core.database import engine
@@ -107,6 +108,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Session middleware (used by /portal login)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.secret_key.get_secret_value(),
+    session_cookie="portal_session",
+    max_age=settings.admin_session_timeout_minutes * 60,
+    same_site="lax",
+    https_only=settings.is_production,
 )
 
 

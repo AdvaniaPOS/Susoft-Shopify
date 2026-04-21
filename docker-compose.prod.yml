@@ -27,6 +27,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
       - WEBHOOK_BASE_URL=${WEBHOOK_BASE_URL}
@@ -59,6 +60,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - SECRET_KEY=${SECRET_KEY}
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     depends_on:
       db:
@@ -87,6 +89,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - SECRET_KEY=${SECRET_KEY}
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     depends_on:
       - worker

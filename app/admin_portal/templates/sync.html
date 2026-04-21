@@ -82,19 +82,6 @@
                         </button>
                     </div>
                     
-                    <!-- Import Orders -->
-                    <div class="border rounded-lg p-4">
-                        <h3 class="font-medium mb-2">🛒 Importer ordrer</h3>
-                        <p class="text-sm text-gray-500 mb-4">
-                            Hent nylige ordrer fra Shopify og send til Susoft
-                        </p>
-                        <button @click="importOrders()" 
-                                :disabled="syncing"
-                                class="w-full bg-purple-600 text-white py-2 rounded-lg hover:bg-purple-700 disabled:opacity-50">
-                            Start import
-                        </button>
-                    </div>
-                    
                     <!-- Test Connection -->
                     <div class="border rounded-lg p-4">
                         <h3 class="font-medium mb-2">🔌 Test tilkobling</h3>
@@ -108,6 +95,67 @@
                             <span x-show="testing">Tester...</span>
                         </button>
                     </div>
+                    
+                    <!-- Diagnose stock drift -->
+                    <div class="border rounded-lg p-4">
+                        <h3 class="font-medium mb-2">🔍 Diagnose lager</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Sammenlign Susoft vs Shopify lager per produkt og lokasjon
+                        </p>
+                        <button @click="runDiagnose()"
+                                :disabled="diagnosing"
+                                class="w-full bg-amber-600 text-white py-2 rounded-lg hover:bg-amber-700 disabled:opacity-50">
+                            <span x-show="!diagnosing">Kjør diagnose</span>
+                            <span x-show="diagnosing">Analyserer...</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Diagnose Results -->
+            <div x-show="diagnoseResult" x-cloak class="bg-white rounded-lg shadow p-6 mb-8">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold">Lagerdiagnose</h2>
+                    <div class="text-sm text-gray-600">
+                        OK: <span class="font-medium text-green-600" x-text="diagnoseResult?.summary.ok"></span> ·
+                        Drift: <span class="font-medium text-orange-600" x-text="diagnoseResult?.summary.drift"></span> ·
+                        Mangler Susoft: <span class="font-medium text-red-600" x-text="diagnoseResult?.summary.no_susoft"></span> ·
+                        Mangler Shopify: <span class="font-medium text-red-600" x-text="diagnoseResult?.summary.no_shopify"></span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">SKU</th>
+                                <th class="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Susoft ID</th>
+                                <th class="px-3 py-2 text-right font-medium text-gray-500 uppercase text-xs">Live Sus</th>
+                                <th class="px-3 py-2 text-right font-medium text-gray-500 uppercase text-xs">Live Shop</th>
+                                <th class="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Per lokasjon</th>
+                                <th class="px-3 py-2 text-right font-medium text-gray-500 uppercase text-xs">Forventet</th>
+                                <th class="px-3 py-2 text-right font-medium text-gray-500 uppercase text-xs">Diff</th>
+                                <th class="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200">
+                            <template x-for="row in diagnoseResult?.rows || []" :key="row.susoft_id">
+                                <tr :class="row.status === 'drift' ? 'bg-orange-50' : (row.status === 'no_susoft' || row.status === 'no_shopify' ? 'bg-red-50' : '')">
+                                    <td class="px-3 py-2 font-mono" x-text="row.sku"></td>
+                                    <td class="px-3 py-2 font-mono" x-text="row.susoft_id"></td>
+                                    <td class="px-3 py-2 text-right" x-text="row.live_susoft ?? '-'"></td>
+                                    <td class="px-3 py-2 text-right" x-text="row.live_shopify_total ?? '-'"></td>
+                                    <td class="px-3 py-2 text-xs text-gray-600" x-text="Object.entries(row.live_shopify_per_location || {}).map(([k,v]) => `${k}=${v}`).join(', ')"></td>
+                                    <td class="px-3 py-2 text-right" x-text="row.expected_shopify ?? '-'"></td>
+                                    <td class="px-3 py-2 text-right font-medium" :class="row.diff > 0 ? 'text-orange-600' : (row.diff < 0 ? 'text-red-600' : 'text-gray-400')" x-text="row.diff ?? '-'"></td>
+                                    <td class="px-3 py-2">
+                                        <span class="px-2 py-1 rounded text-xs font-medium"
+                                              :class="row.status === 'ok' ? 'bg-green-100 text-green-800' : (row.status === 'drift' ? 'bg-orange-100 text-orange-800' : 'bg-red-100 text-red-800')"
+                                              x-text="row.status"></span>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
                 </div>
             </div>
 
@@ -196,6 +244,8 @@ function syncPage() {
         connectionResults: null,
         message: '',
         messageType: 'success',
+        diagnosing: false,
+        diagnoseResult: null,
         
         async init() {
             await this.loadTenants();
@@ -245,13 +295,35 @@ function syncPage() {
         },
         
         async syncProducts() {
-            // This would trigger a product mapping sync
-            this.showMessage('Produktsynkronisering ikke implementert ennå', 'error');
+            if (!confirm('Bygg produktmappinger på nytt fra Susoft? Dette deaktiverer mappinger som ikke matcher.')) return;
+            this.syncing = true;
+            try {
+                const res = await apiCall(`/tenants/${this.selectedTenantId}/rebootstrap-mappings?match_key=barcode&deactivate_unmatched=true`, 'POST');
+                this.showMessage(`Mappinger oppdatert: created=${res.created} updated=${res.updated} deactivated=${res.deactivated_existing}`, 'success');
+                await this.loadMappings();
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            } finally {
+                this.syncing = false;
+            }
         },
         
         async importOrders() {
-            // This would import recent orders from Shopify
             this.showMessage('Ordreimport ikke implementert ennå', 'error');
+        },
+        
+        async runDiagnose() {
+            this.diagnosing = true;
+            this.diagnoseResult = null;
+            try {
+                const res = await apiCall(`/tenants/${this.selectedTenantId}/diagnose-stock?only_mismatch=false`);
+                this.diagnoseResult = res;
+                this.showMessage(`Diagnose ferdig: ok=${res.summary.ok} drift=${res.summary.drift} no_susoft=${res.summary.no_susoft} no_shopify=${res.summary.no_shopify}`, 'success');
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            } finally {
+                this.diagnosing = false;
+            }
         },
         
         async testConnection() {

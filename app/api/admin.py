@@ -569,6 +569,251 @@ async def trigger_stock_sync(
     return {"status": "queued"}
 
 
+@router.post("/tenants/{tenant_id}/rebootstrap-mappings")
+async def rebootstrap_mappings(
+    tenant_id: str,
+    match_key: str = Query(default="barcode", pattern="^(barcode|id|external_ref)$"),
+    safety_stock: int = Query(default=0, ge=0),
+    deactivate_unmatched: bool = Query(default=True),
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key),
+):
+    """Rebuild ProductMapping rows for a tenant from live Susoft + Shopify data.
+
+    For every Susoft product the SKU/barcode is matched against Shopify variant
+    SKUs. New mappings are created; existing mappings (matched by Susoft id)
+    are updated to point at the matched Shopify variant. Optionally,
+    unmatched existing mappings are deactivated so they no longer pull stock.
+    """
+    from app.services.shopify_client import create_shopify_client
+    from app.services.susoft_client import create_susoft_client
+    from app.db.models import ProductMapping
+    from sqlalchemy import select, update as sa_update
+
+    tenant_repo = TenantRepository(session)
+    mapping_repo = ProductMappingRepository(session)
+
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    susoft_client = create_susoft_client(
+        base_url=tenant.susoft_api_url,
+        api_key_encrypted=tenant.susoft_api_key_encrypted,
+        integration_id=tenant.susoft_integration_id,
+    )
+    shopify_client = create_shopify_client(
+        shop_url=tenant.shopify_shop_url,
+        access_token_encrypted=tenant.shopify_access_token_encrypted,
+    )
+
+    def _norm(s):
+        if s is None:
+            return None
+        s = str(s).strip().lower()
+        return s or None
+
+    def _susoft_match_value(p):
+        if match_key == "barcode":
+            return _norm(p.get("barcode"))
+        if match_key == "id":
+            return _norm(p.get("id") or p.get("productId"))
+        return _norm(p.get("externalRefId"))
+
+    async with susoft_client, shopify_client:
+        susoft_products = await susoft_client.get_all_products()
+        shopify_products = await shopify_client.get_all_products(fields="id,title,variants")
+        default_loc = tenant.shopify_default_location_id
+
+        # Build Shopify SKU -> variant index
+        shop_index = {}
+        for prod in shopify_products:
+            for var in prod.get("variants") or []:
+                sku = _norm(var.get("sku"))
+                if sku and sku not in shop_index:
+                    shop_index[sku] = {
+                        "product_id": str(prod.get("id")),
+                        "variant_id": str(var.get("id")),
+                        "inventory_item_id": str(var.get("inventory_item_id")),
+                    }
+
+        # Build Susoft id -> match value
+        susoft_by_id = {}
+        for p in susoft_products:
+            pid = p.get("id") or p.get("productId")
+            if pid is None:
+                continue
+            susoft_by_id[str(pid)] = (_susoft_match_value(p), p)
+
+        existing = await mapping_repo.get_all_for_tenant(tenant.id, active_only=False)
+        existing_by_susoft = {m.susoft_product_id: m for m in existing}
+
+        created = 0
+        updated = 0
+        deactivated = 0
+        unmatched_susoft = 0
+        matched_ids: set[str] = set()
+
+        for sus_id, (mval, prod) in susoft_by_id.items():
+            if not mval:
+                continue
+            shop_match = shop_index.get(mval)
+            if not shop_match:
+                unmatched_susoft += 1
+                continue
+            matched_ids.add(sus_id)
+            mapping = existing_by_susoft.get(sus_id)
+            if mapping:
+                mapping.sku = mval
+                mapping.shopify_product_id = shop_match["product_id"]
+                mapping.shopify_variant_id = shop_match["variant_id"]
+                mapping.shopify_inventory_item_id = shop_match["inventory_item_id"]
+                if not mapping.shopify_location_id:
+                    mapping.shopify_location_id = default_loc
+                mapping.is_active = True
+                updated += 1
+            else:
+                await mapping_repo.create(
+                    tenant_id=str(tenant.id),
+                    sku=mval,
+                    susoft_product_id=sus_id,
+                    shopify_product_id=shop_match["product_id"],
+                    shopify_variant_id=shop_match["variant_id"],
+                    shopify_inventory_item_id=shop_match["inventory_item_id"],
+                    shopify_location_id=default_loc,
+                    safety_stock=safety_stock,
+                )
+                created += 1
+
+        if deactivate_unmatched:
+            for m in existing:
+                if m.is_active and m.susoft_product_id not in matched_ids:
+                    m.is_active = False
+                    deactivated += 1
+
+        await session.commit()
+
+    logger.info(
+        "Rebootstrap complete",
+        tenant_id=tenant_id,
+        created=created,
+        updated=updated,
+        deactivated=deactivated,
+    )
+    return {
+        "status": "ok",
+        "match_key": match_key,
+        "susoft_products": len(susoft_by_id),
+        "shopify_skus": len(shop_index),
+        "created": created,
+        "updated": updated,
+        "deactivated_existing": deactivated,
+        "unmatched_susoft": unmatched_susoft,
+    }
+
+
+@router.get("/tenants/{tenant_id}/diagnose-stock")
+async def diagnose_stock(
+    tenant_id: str,
+    only_mismatch: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key),
+):
+    """Compare Susoft live stock vs Shopify per-location stock for every active mapping."""
+    from app.services.shopify_client import create_shopify_client
+    from app.services.susoft_client import create_susoft_client
+
+    tenant_repo = TenantRepository(session)
+    mapping_repo = ProductMappingRepository(session)
+
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    mappings = await mapping_repo.get_active_mappings(tenant_id)
+    susoft_client = create_susoft_client(
+        base_url=tenant.susoft_api_url,
+        api_key_encrypted=tenant.susoft_api_key_encrypted,
+        integration_id=tenant.susoft_integration_id,
+    )
+    shopify_client = create_shopify_client(
+        shop_url=tenant.shopify_shop_url,
+        access_token_encrypted=tenant.shopify_access_token_encrypted,
+    )
+
+    rows: list[dict] = []
+    summary = {"inspected": len(mappings), "no_susoft": 0, "no_shopify": 0, "drift": 0, "ok": 0}
+
+    async with susoft_client, shopify_client:
+        susoft_products = await susoft_client.get_all_products()
+        stock_lookup: dict[str, int] = {}
+        for item in susoft_products:
+            pid = item.get("id") or item.get("productId")
+            if pid is None:
+                continue
+            stock_obj = item.get("stock") or {}
+            qty = stock_obj.get("stock", 0) if isinstance(stock_obj, dict) else stock_obj
+            try:
+                stock_lookup[str(pid)] = int(qty or 0)
+            except (TypeError, ValueError):
+                stock_lookup[str(pid)] = 0
+
+        locations = await shopify_client.get_locations()
+        location_ids = [str(loc.get("id")) for loc in locations if loc.get("id")]
+        location_names = {str(loc.get("id")): loc.get("name", "?") for loc in locations}
+
+        inv_lookup: dict[str, dict[str, int]] = {}
+        inv_ids = [str(m.shopify_inventory_item_id) for m in mappings if m.shopify_inventory_item_id]
+        for i in range(0, len(inv_ids), 50):
+            chunk = inv_ids[i : i + 50]
+            levels = await shopify_client.get_inventory_levels(chunk, location_ids=location_ids or None)
+            for lvl in levels:
+                iid = str(lvl.get("inventory_item_id"))
+                lid = str(lvl.get("location_id"))
+                inv_lookup.setdefault(iid, {})[lid] = int(lvl.get("available") or 0)
+
+        for m in mappings:
+            sus_id = str(m.susoft_product_id)
+            live_sus = stock_lookup.get(sus_id)
+            safety = m.safety_stock or 0
+            expected = max(0, (live_sus or 0) - safety) if live_sus is not None else None
+            inv_at = inv_lookup.get(str(m.shopify_inventory_item_id), {})
+            live_shop = sum(inv_at.values()) if inv_at else None
+            per_loc = {location_names.get(lid, lid): qty for lid, qty in inv_at.items()}
+
+            if live_sus is None:
+                status = "no_susoft"
+                summary["no_susoft"] += 1
+            elif live_shop is None:
+                status = "no_shopify"
+                summary["no_shopify"] += 1
+            elif expected != live_shop:
+                status = "drift"
+                summary["drift"] += 1
+            else:
+                status = "ok"
+                summary["ok"] += 1
+
+            if only_mismatch and status == "ok":
+                continue
+
+            rows.append({
+                "sku": m.sku,
+                "susoft_id": sus_id,
+                "live_susoft": live_sus,
+                "db_susoft": m.current_susoft_stock,
+                "db_shopify": m.current_shopify_stock,
+                "live_shopify_total": live_shop,
+                "live_shopify_per_location": per_loc,
+                "safety_stock": safety,
+                "expected_shopify": expected,
+                "status": status,
+                "diff": (live_shop - expected) if (live_shop is not None and expected is not None) else None,
+            })
+
+    return {"tenant_id": tenant_id, "summary": summary, "locations": location_names, "rows": rows}
+
+
 @router.post("/tenants/{tenant_id}/orders/{shopify_order_id}/close-after-susoft")
 async def close_order_after_susoft(
     tenant_id: str,

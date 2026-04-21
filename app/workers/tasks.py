@@ -705,7 +705,14 @@ async def _build_susoft_order(
         next_line_no += 1
     
     # Build the order (per Susoft Order schema)
-    now_dt = datetime.now(timezone.utc)
+    # Susoft expects local time without offset; use Europe/Oslo so timestamps
+    # match what users see in the Susoft UI.
+    try:
+        from zoneinfo import ZoneInfo
+        _OSLO = ZoneInfo("Europe/Oslo")
+    except Exception:  # pragma: no cover - fallback
+        _OSLO = timezone.utc
+    now_dt = datetime.now(_OSLO)
     now_iso_dt = now_dt.strftime("%Y-%m-%dT%H:%M:%S.000")
     susoft_order = {
         "shopId": susoft_shop_id,
@@ -727,7 +734,7 @@ async def _build_susoft_order(
     if financial_status in {"paid", "partially_paid"}:
         total_amount = _parse_float(order_data.get("total_price", 0))
         payment_type = _map_gateway_to_payment_type(order_data.get("payment_gateway_names", []))
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
+        now_iso = now_iso_dt
 
         susoft_order["payments"] = [{
             "paymentType": payment_type,

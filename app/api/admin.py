@@ -569,6 +569,55 @@ async def trigger_stock_sync(
     return {"status": "queued"}
 
 
+@router.post("/tenants/{tenant_id}/test-connection")
+async def test_tenant_connection(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key),
+):
+    """Live-ping Susoft and Shopify APIs for a tenant. Returns ok/error per side."""
+    from app.services.shopify_client import create_shopify_client
+    from app.services.susoft_client import create_susoft_client
+
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    result: Dict[str, Any] = {"susoft": {"ok": False}, "shopify": {"ok": False}}
+
+    # Susoft
+    try:
+        susoft_client = create_susoft_client(
+            base_url=tenant.susoft_api_url,
+            api_key_encrypted=tenant.susoft_api_key_encrypted,
+            integration_id=tenant.susoft_integration_id,
+        )
+        async with susoft_client:
+            healthy = await susoft_client.health_check()
+            result["susoft"] = {"ok": bool(healthy), "shop_url_key": tenant.susoft_integration_id}
+    except Exception as exc:  # noqa: BLE001
+        result["susoft"] = {"ok": False, "error": str(exc)}
+
+    # Shopify
+    try:
+        shopify_client = create_shopify_client(
+            shop_url=tenant.shopify_shop_url,
+            access_token_encrypted=tenant.shopify_access_token_encrypted,
+        )
+        async with shopify_client:
+            info = await shopify_client.get_shop_info()
+            result["shopify"] = {
+                "ok": True,
+                "shop_name": info.get("name"),
+                "domain": info.get("myshopify_domain") or info.get("domain"),
+            }
+    except Exception as exc:  # noqa: BLE001
+        result["shopify"] = {"ok": False, "error": str(exc)}
+
+    return result
+
+
 @router.post("/tenants/{tenant_id}/rebootstrap-mappings")
 async def rebootstrap_mappings(
     tenant_id: str,

@@ -165,11 +165,21 @@
                 <div class="space-y-3">
                     <div class="flex items-center">
                         <div class="w-4 h-4 rounded-full mr-3" :class="connectionResults?.susoft ? 'bg-green-500' : 'bg-red-500'"></div>
-                        <span>Susoft API: <span x-text="connectionResults?.susoft ? 'OK' : 'Feil'"></span></span>
+                        <span>Susoft API: <span x-text="connectionResults?.susoft ? 'OK' : 'Feil'"></span>
+                            <span class="text-sm text-gray-500 ml-2"
+                                  x-text="connectionResults?.susoft_detail?.shop_url_key
+                                      ? `(shop=${connectionResults.susoft_detail.shop_url_key})`
+                                      : (connectionResults?.susoft_detail?.error || '')"></span>
+                        </span>
                     </div>
                     <div class="flex items-center">
                         <div class="w-4 h-4 rounded-full mr-3" :class="connectionResults?.shopify ? 'bg-green-500' : 'bg-red-500'"></div>
-                        <span>Shopify API: <span x-text="connectionResults?.shopify ? 'OK' : 'Feil'"></span></span>
+                        <span>Shopify API: <span x-text="connectionResults?.shopify ? 'OK' : 'Feil'"></span>
+                            <span class="text-sm text-gray-500 ml-2"
+                                  x-text="connectionResults?.shopify_detail?.shop_name
+                                      ? `(${connectionResults.shopify_detail.shop_name} · ${connectionResults.shopify_detail.domain || ''})`
+                                      : (connectionResults?.shopify_detail?.error || '')"></span>
+                        </span>
                     </div>
                 </div>
             </div>
@@ -329,21 +339,25 @@ function syncPage() {
         async testConnection() {
             this.testing = true;
             this.connectionResults = null;
-            
             try {
-                // Simulate connection test (you'd implement actual endpoints)
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                const res = await apiCall(`/tenants/${this.selectedTenantId}/test-connection`, 'POST');
                 this.connectionResults = {
-                    susoft: true,
-                    shopify: true
+                    susoft: res.susoft?.ok === true,
+                    shopify: res.shopify?.ok === true,
+                    susoft_detail: res.susoft,
+                    shopify_detail: res.shopify,
                 };
-                this.showMessage('Tilkoblinger OK!', 'success');
+                if (res.susoft?.ok && res.shopify?.ok) {
+                    this.showMessage('Begge tilkoblinger OK!', 'success');
+                } else {
+                    const failed = [];
+                    if (!res.susoft?.ok) failed.push('Susoft: ' + (res.susoft?.error || 'feilet'));
+                    if (!res.shopify?.ok) failed.push('Shopify: ' + (res.shopify?.error || 'feilet'));
+                    this.showMessage(failed.join(' | '), 'error');
+                }
             } catch (err) {
-                this.connectionResults = {
-                    susoft: false,
-                    shopify: false
-                };
-                this.showMessage('Tilkoblingstest feilet', 'error');
+                this.connectionResults = { susoft: false, shopify: false };
+                this.showMessage('Tilkoblingstest feilet: ' + err.message, 'error');
             } finally {
                 this.testing = false;
             }

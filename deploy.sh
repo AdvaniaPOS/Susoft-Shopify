@@ -34,19 +34,25 @@ if [ ! -f .env ]; then
     echo "📝 Oppretter .env fil..."
     
     # Generate secure keys
-    ENCRYPTION_KEY=$(openssl rand -hex 32)
+    SECRET_KEY=$(openssl rand -hex 32)
+    # Fernet key = urlsafe-base64 of 32 random bytes
+    ENCRYPTION_KEY=$(openssl rand 32 | base64 | tr '+/' '-_' | tr -d '\n')
     JWT_SECRET=$(openssl rand -hex 32)
     ADMIN_KEY=$(openssl rand -hex 16)
-    WEBHOOK_SECRET=$(openssl rand -hex 32)
+    ADMIN_PASS=$(openssl rand -hex 12)
+    WEBHOOK_SECRET_VAL=$(openssl rand -hex 32)
     DB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)
     
     cat > .env << EOF
 # Production Environment - Generated $(date)
 DB_PASSWORD=${DB_PASSWORD}
+SECRET_KEY=${SECRET_KEY}
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
 JWT_SECRET_KEY=${JWT_SECRET}
 ADMIN_API_KEY=${ADMIN_KEY}
-WEBHOOK_SECRET=${WEBHOOK_SECRET}
+ADMIN_PASSWORD=${ADMIN_PASS}
+WEBHOOK_SECRET=${WEBHOOK_SECRET_VAL}
+WEBHOOK_BASE_URL=https://shopify.poshub.no
 EOF
     
     echo "✅ .env opprettet med sikre nøkler"

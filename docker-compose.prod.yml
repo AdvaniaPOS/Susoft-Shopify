@@ -17,15 +17,19 @@ services:
       - "5400:8000"
     environment:
       - ENVIRONMENT=production
+      - APP_ENV=production
       - DEBUG=false
       - DATABASE_URL=postgresql+asyncpg://postgres:${DB_PASSWORD}@db:5432/susoft_shopify
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WEBHOOK_BASE_URL=${WEBHOOK_BASE_URL}
     depends_on:
       db:
         condition: service_healthy
@@ -48,11 +52,14 @@ services:
     restart: always
     environment:
       - ENVIRONMENT=production
+      - APP_ENV=production
       - DATABASE_URL=postgresql+asyncpg://postgres:${DB_PASSWORD}@db:5432/susoft_shopify
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -73,11 +80,14 @@ services:
     restart: always
     environment:
       - ENVIRONMENT=production
+      - APP_ENV=production
       - DATABASE_URL=postgresql+asyncpg://postgres:${DB_PASSWORD}@db:5432/susoft_shopify
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     depends_on:
       - worker
     command: celery -A app.workers.celery_app beat --loglevel=info

@@ -985,36 +985,69 @@ async def _sync_stock_to_shopify_async(
                     qty = stock_obj.get("stock", 0) or 0
                 else:
                     qty = stock_obj or 0
-                stock_lookup[str(pid)] = qty
-            
+                stock_lookup[str(pid)] = int(qty) if qty is not None else 0
+
+            logger.info(
+                "Fetched Susoft products for stock sync",
+                tenant_id=tenant_id,
+                susoft_products=len(susoft_products),
+                stock_lookup_size=len(stock_lookup),
+                mappings=len(mappings),
+            )
+
             # Prepare bulk updates
             updates = []
+            skipped_no_location = 0
+            skipped_no_inventory_item = 0
+            unmatched = 0
             for mapping in mappings:
-                susoft_qty = stock_lookup.get(str(mapping.susoft_product_id), 0)
+                key = str(mapping.susoft_product_id)
+                if key not in stock_lookup:
+                    unmatched += 1
+                susoft_qty = stock_lookup.get(key, 0)
                 safety_stock = mapping.safety_stock or 0
                 available = max(0, susoft_qty - safety_stock)
-                
+
                 shopify_location_id = (
-                    mapping.shopify_location_id or 
+                    mapping.shopify_location_id or
                     tenant.shopify_default_location_id
                 )
-                
-                if shopify_location_id:
-                    updates.append({
-                        "inventory_item_id": mapping.shopify_inventory_item_id,
-                        "location_id": shopify_location_id,
-                        "available": available
-                    })
-            
+
+                if not mapping.shopify_inventory_item_id:
+                    skipped_no_inventory_item += 1
+                    continue
+                if not shopify_location_id:
+                    skipped_no_location += 1
+                    continue
+
+                updates.append({
+                    "inventory_item_id": mapping.shopify_inventory_item_id,
+                    "location_id": shopify_location_id,
+                    "available": available,
+                })
+
+            logger.info(
+                "Prepared stock updates",
+                tenant_id=tenant_id,
+                updates=len(updates),
+                unmatched_in_susoft=unmatched,
+                skipped_no_inventory_item=skipped_no_inventory_item,
+                skipped_no_location=skipped_no_location,
+            )
+
             if updates:
                 # Use bulk update for efficiency
                 await shopify_client.bulk_set_inventory_levels(updates)
-                
+
                 logger.info(
                     "Bulk stock sync completed",
                     tenant_id=tenant_id,
                     count=len(updates)
                 )
+
+            # Record completion time so the scheduler respects sync_interval_seconds.
+            tenant.last_stock_sync_at = datetime.now(timezone.utc)
+            await session.flush()
 
 
 @celery_app.task

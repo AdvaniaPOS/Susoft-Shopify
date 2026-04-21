@@ -707,7 +707,7 @@ async def _build_susoft_order(
     # Build the order (per Susoft Order schema)
     susoft_order = {
         "shopId": susoft_shop_id,
-        "orderDateTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+        "orderDateTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000"),
         "customer": susoft_customer,
         "deliveryAddress": susoft_address,
         "invoiceAddress": susoft_address,
@@ -721,7 +721,7 @@ async def _build_susoft_order(
     if financial_status in {"paid", "partially_paid"}:
         total_amount = _parse_float(order_data.get("total_price", 0))
         payment_type = _map_gateway_to_payment_type(order_data.get("payment_gateway_names", []))
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
 
         susoft_order["payments"] = [{
             "paymentType": payment_type,

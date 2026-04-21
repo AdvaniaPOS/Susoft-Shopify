@@ -403,10 +403,10 @@ class SyncLogRepository(BaseRepository[SyncLog]):
                 SyncLog.tenant_id == tid,
                 SyncLog.external_id == external_id
             )
-        ).order_by(SyncLog.created_at.desc())
-        
+        ).order_by(SyncLog.created_at.desc()).limit(1)
+
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
     
     async def update_status(
         self,

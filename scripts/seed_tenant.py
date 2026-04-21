@@ -49,6 +49,17 @@ async def main() -> int:
     shopify = src["shopify"]
     cfg = src.get("config", {}) or {}
 
+    # Susoft requires POST /user/auth to obtain a JWT. We pack login/password
+    # into the encrypted api_key field and let SusoftClient authenticate on
+    # demand. Fallback: accept a pre-issued token if tenants.json provides one.
+    if "token" in susoft and susoft["token"]:
+        susoft_secret_plain = susoft["token"]
+    else:
+        susoft_secret_plain = json.dumps({
+            "login": susoft["login"],
+            "password": susoft["password"],
+        })
+
     print(f"Seeding tenant slug={slug!r}…")
 
     async with get_session_context() as session:
@@ -63,7 +74,7 @@ async def main() -> int:
         if existing:
             existing.name = name
             existing.susoft_api_url = susoft["api_url"]
-            existing.susoft_api_key_encrypted = encrypt_credential(susoft["password"])
+            existing.susoft_api_key_encrypted = encrypt_credential(susoft_secret_plain)
             existing.susoft_integration_id = susoft["shop_id"]
             existing.shopify_shop_url = shopify["shop_domain"]
             existing.shopify_access_token_encrypted = encrypt_credential(shopify["access_token"])
@@ -78,7 +89,7 @@ async def main() -> int:
             slug=slug,
             is_active=True,
             susoft_api_url=susoft["api_url"],
-            susoft_api_key_encrypted=encrypt_credential(susoft["password"]),
+            susoft_api_key_encrypted=encrypt_credential(susoft_secret_plain),
             susoft_integration_id=susoft["shop_id"],
             shopify_shop_url=shopify["shop_domain"],
             shopify_access_token_encrypted=encrypt_credential(shopify["access_token"]),

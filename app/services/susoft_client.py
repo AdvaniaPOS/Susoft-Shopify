@@ -14,6 +14,7 @@ Reference: Susoft REST API v3.1
 """
 
 import asyncio
+import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from uuid import UUID
@@ -120,9 +121,27 @@ class SusoftClient:
     async def _ensure_client(self) -> None:
         """Ensure HTTP client is initialized."""
         if self._client is None:
-            # Decrypt API key
-            self._token = decrypt_credential(self._api_key_encrypted)
-            
+            # Decrypt API key. The stored secret may either be a literal JWT
+            # token (legacy) or a JSON blob {"login": "...", "password": "..."}
+            # in which case we sign in via /user/auth to obtain a JWT.
+            raw_secret = decrypt_credential(self._api_key_encrypted)
+
+            self._login: Optional[str] = None
+            self._password: Optional[str] = None
+            self._token = None
+
+            try:
+                parsed = json.loads(raw_secret)
+            except (ValueError, TypeError):
+                parsed = None
+
+            if isinstance(parsed, dict) and parsed.get("login") and parsed.get("password"):
+                self._login = parsed["login"]
+                self._password = parsed["password"]
+            else:
+                # Treat as literal token (backward compatible).
+                self._token = raw_secret
+
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self.timeout),
@@ -131,6 +150,50 @@ class SusoftClient:
                     "Accept": "application/json"
                 }
             )
+
+            if self._login and self._password:
+                await self._authenticate()
+
+    async def _authenticate(self) -> None:
+        """Sign in to Susoft via POST /user/auth and cache the JWT."""
+        if not (self._login and self._password):
+            raise SusoftAuthenticationError(
+                "Cannot authenticate: no login/password configured"
+            )
+        assert self._client is not None
+
+        logger.info(
+            "Authenticating with Susoft",
+            login=self._login,
+            shop_url_key=self.shop_url_key,
+        )
+
+        response = await self._client.post(
+            "/user/auth",
+            json={"login": self._login, "password": self._password},
+            headers={
+                "X-Shop-Url-Key": self.shop_url_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+        if response.status_code != 200:
+            body = response.text
+            raise SusoftAuthenticationError(
+                f"Susoft login failed: HTTP {response.status_code} {body}",
+                status_code=response.status_code,
+            )
+
+        data = response.json() or {}
+        token = data.get("token")
+        if not token or not data.get("success", True):
+            raise SusoftAuthenticationError(
+                f"Susoft login returned no token: {data}",
+                status_code=response.status_code,
+                response_body=data,
+            )
+        self._token = token
     
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -191,13 +254,25 @@ class SusoftClient:
                 json=json_data,
                 headers=self._get_headers()
             )
-            
+
             # Handle different status codes
             if response.status_code == 401:
-                raise SusoftAuthenticationError(
-                    "Authentication failed",
-                    status_code=401
-                )
+                # If we have login/password, try a single re-auth and retry once.
+                if self._login and self._password:
+                    logger.info("Susoft returned 401, re-authenticating and retrying once")
+                    await self._authenticate()
+                    response = await self._client.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json_data,
+                        headers=self._get_headers()
+                    )
+                if response.status_code == 401:
+                    raise SusoftAuthenticationError(
+                        "Authentication failed",
+                        status_code=401
+                    )
             
             if response.status_code == 429:
                 raise SusoftRateLimitError(

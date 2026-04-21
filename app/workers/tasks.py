@@ -721,6 +721,7 @@ async def _build_susoft_order(
     if financial_status in {"paid", "partially_paid"}:
         total_amount = _parse_float(order_data.get("total_price", 0))
         payment_type = _map_gateway_to_payment_type(order_data.get("payment_gateway_names", []))
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
 
         susoft_order["payments"] = [{
             "paymentType": payment_type,
@@ -732,6 +733,8 @@ async def _build_susoft_order(
             "shopId": susoft_shop_id,
             "issuedShopId": susoft_shop_id,
             "transactionId": f"shopify-{order_data.get('id')}",
+            "paymentDateTime": now_iso,
+            "number": str(order_data.get("id", "")),
             "note": "Betalt i Shopify"
         }]
         susoft_order["isForInvoicing"] = False

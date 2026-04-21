@@ -1084,6 +1084,234 @@ async def _sync_stock_to_shopify_async(
             await session.flush()
 
 
+# ===================================================================
+# Product attribute sync (Susoft -> Shopify): name, price, category, VAT
+# ===================================================================
+
+def _extract_susoft_product_fields(p: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize a Susoft product payload into the fields we sync to Shopify.
+
+    Susoft's product schema varies between deployments, so this function
+    tries multiple common field names and returns ``None`` for anything
+    that cannot be located. Downstream code skips updates for missing
+    fields rather than overwriting Shopify values with empty data.
+    """
+    name = p.get("name") or p.get("productName") or p.get("title")
+
+    # Price: prefer price including VAT (matches Shopify storefront price in Norway)
+    price = (
+        p.get("priceWithVAT")
+        or p.get("priceVAT")
+        or p.get("priceInclVat")
+        or p.get("priceInclVAT")
+        or p.get("salesPrice")
+        or p.get("price")
+    )
+
+    # VAT rate (e.g. 25 for 25%)
+    vat_rate = (
+        p.get("vatRate")
+        if p.get("vatRate") is not None
+        else p.get("vat") if p.get("vat") is not None
+        else p.get("vatPercent") if p.get("vatPercent") is not None
+        else (p.get("vatCode") or {}).get("rate") if isinstance(p.get("vatCode"), dict) else None
+    )
+
+    # Category: may be a string or a nested object
+    category = None
+    cat_obj = p.get("category") or p.get("productGroup") or p.get("group")
+    if isinstance(cat_obj, dict):
+        category = cat_obj.get("name") or cat_obj.get("title") or cat_obj.get("text")
+    elif isinstance(cat_obj, str):
+        category = cat_obj
+    if not category:
+        category = p.get("categoryName") or p.get("groupName")
+
+    return {
+        "name": name.strip() if isinstance(name, str) else None,
+        "price": price,
+        "vat_rate": vat_rate,
+        "category": category.strip() if isinstance(category, str) else category,
+    }
+
+
+def _format_price(value: Any) -> Optional[str]:
+    """Format a numeric price for Shopify (string with 2 decimals)."""
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+@celery_app.task(base=BaseTaskWithRetry, bind=True)
+def sync_products_to_shopify(self, tenant_id: str):
+    """
+    Sync product attributes (name, price, category, VAT) from Susoft to Shopify.
+
+    Iterates over all active product mappings for the tenant, compares Susoft
+    master data with Shopify, and pushes any deltas via REST. Designed to be
+    run on a schedule (e.g. every 30 min) and is safe to run concurrently
+    with stock sync.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _sync_products_to_shopify_async(task=self, tenant_id=tenant_id)
+    )
+
+
+async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
+    """Async implementation of product attribute sync."""
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+        mapping_repo = ProductMappingRepository(session)
+
+        tenant = await tenant_repo.get_by_id(tenant_id)
+        if not tenant or not tenant.is_active:
+            return
+
+        mappings = await mapping_repo.get_active_mappings(tenant_id)
+        if not mappings:
+            logger.info("No mappings to sync product attributes for", tenant_id=tenant_id)
+            return
+
+        susoft_client = create_susoft_client(
+            base_url=tenant.susoft_api_url,
+            api_key_encrypted=tenant.susoft_api_key_encrypted,
+            integration_id=tenant.susoft_integration_id,
+        )
+        shopify_client = create_shopify_client(
+            shop_url=tenant.shopify_shop_url,
+            access_token_encrypted=tenant.shopify_access_token_encrypted,
+        )
+
+        async with susoft_client, shopify_client:
+            susoft_products = await susoft_client.get_all_products()
+
+            # Build lookup: susoft product id -> normalized fields
+            product_lookup: Dict[str, Dict[str, Any]] = {}
+            for raw in susoft_products:
+                pid = raw.get("id") or raw.get("productId")
+                if pid is None:
+                    continue
+                product_lookup[str(pid)] = _extract_susoft_product_fields(raw)
+
+            logger.info(
+                "Starting product attribute sync",
+                tenant_id=tenant_id,
+                susoft_products=len(susoft_products),
+                mappings=len(mappings),
+            )
+
+            updated_products = 0
+            updated_variants = 0
+            unmatched = 0
+            skipped = 0
+            errors = 0
+
+            # Cache product fetches across mappings sharing the same Shopify product
+            product_cache: Dict[str, Dict[str, Any]] = {}
+
+            for mapping in mappings:
+                key = str(mapping.susoft_product_id)
+                susoft_fields = product_lookup.get(key)
+                if not susoft_fields:
+                    unmatched += 1
+                    continue
+
+                if not mapping.shopify_product_id or not mapping.shopify_variant_id:
+                    skipped += 1
+                    continue
+
+                try:
+                    shopify_product_id = str(mapping.shopify_product_id)
+                    shopify_variant_id = str(mapping.shopify_variant_id)
+
+                    # Fetch current Shopify product (cached) to compare title / type
+                    shop_product = product_cache.get(shopify_product_id)
+                    if shop_product is None:
+                        shop_product = await shopify_client.get_product(shopify_product_id)
+                        product_cache[shopify_product_id] = shop_product
+
+                    product_updates: Dict[str, Any] = {}
+                    if susoft_fields["name"] and susoft_fields["name"] != shop_product.get("title"):
+                        product_updates["title"] = susoft_fields["name"]
+                    if (
+                        susoft_fields["category"]
+                        and susoft_fields["category"] != shop_product.get("product_type")
+                    ):
+                        product_updates["product_type"] = susoft_fields["category"]
+
+                    if product_updates:
+                        await shopify_client.update_product(shopify_product_id, product_updates)
+                        # Refresh cache entry so siblings see new values
+                        shop_product.update(product_updates)
+                        updated_products += 1
+
+                    # Variant-level: price + taxable + vat metafield
+                    variant_updates: Dict[str, Any] = {}
+                    new_price = _format_price(susoft_fields["price"])
+                    if new_price is not None:
+                        # Find current variant price from cached product
+                        current_price = None
+                        for v in shop_product.get("variants") or []:
+                            if str(v.get("id")) == shopify_variant_id:
+                                current_price = v.get("price")
+                                break
+                        if current_price is None or _format_price(current_price) != new_price:
+                            variant_updates["price"] = new_price
+
+                    vat_rate = susoft_fields["vat_rate"]
+                    if vat_rate is not None:
+                        try:
+                            vat_float = float(vat_rate)
+                        except (TypeError, ValueError):
+                            vat_float = None
+                        if vat_float is not None:
+                            variant_updates["taxable"] = vat_float > 0
+                            variant_updates["metafields"] = [{
+                                "namespace": "susoft",
+                                "key": "vat_rate",
+                                "value": f"{vat_float:.2f}",
+                                "type": "number_decimal",
+                            }]
+
+                    if variant_updates:
+                        await shopify_client.update_variant(shopify_variant_id, variant_updates)
+                        updated_variants += 1
+
+                except ShopifyAPIError as exc:
+                    errors += 1
+                    logger.warning(
+                        "Failed to sync product attributes",
+                        tenant_id=tenant_id,
+                        susoft_product_id=key,
+                        shopify_product_id=mapping.shopify_product_id,
+                        error=str(exc),
+                    )
+
+            logger.info(
+                "Product attribute sync completed",
+                tenant_id=tenant_id,
+                updated_products=updated_products,
+                updated_variants=updated_variants,
+                unmatched=unmatched,
+                skipped_no_shopify_ids=skipped,
+                errors=errors,
+            )
+
+            # Record last run in Redis so the scheduler can throttle.
+            try:
+                redis_client.set(
+                    f"product_sync:last:{tenant_id}",
+                    datetime.now(timezone.utc).isoformat(),
+                    ex=7 * 24 * 3600,  # keep for 7 days
+                )
+            except Exception:
+                pass
+
+
 @celery_app.task
 def retry_dlq_item(dlq_item_id: str):
     """

@@ -65,7 +65,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.workers.celery_app worker --loglevel=info -Q default,orders,stock,scheduled --concurrency=2
+    command: celery -A app.workers.celery_app worker --loglevel=info -Q default,orders,stock,products,scheduled --concurrency=2
     networks:
       - susoft-network
 

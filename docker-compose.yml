@@ -56,7 +56,7 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app/app
-    command: celery -A app.workers.celery_app worker --loglevel=info -Q default,orders,stock,scheduled
+    command: celery -A app.workers.celery_app worker --loglevel=info -Q default,orders,stock,products,scheduled
     networks:
       - susoft-network
 

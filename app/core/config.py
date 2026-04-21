@@ -140,8 +140,13 @@ class Settings(BaseSettings):
     # Sync Behavior
     # ===================
     shopify_shipping_sku: Optional[str] = Field(
-        default=None,
-        description="Optional SKU in Susoft used to represent Shopify shipping as an order line"
+        default="FRAKT",
+        description=(
+            "SKU in Susoft used to represent Shopify shipping as an order line. "
+            "A product with this SKU/barcode must exist in Susoft (and ideally be "
+            "registered in product_mappings) so the shipping amount can be added "
+            "to the order. Set to empty string to disable."
+        )
     )
 
     # ===================

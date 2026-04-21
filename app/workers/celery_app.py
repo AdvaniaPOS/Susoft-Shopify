@@ -63,6 +63,9 @@ celery_app.conf.update(
         },
         "app.workers.tasks.sync_stock_to_shopify": {
             "rate_limit": "5/m"  # 5 bulk syncs per minute per worker
+        },
+        "app.workers.tasks.sync_products_to_shopify": {
+            "rate_limit": "2/m"  # product sync is heavier; throttle harder
         }
     },
     
@@ -91,6 +94,12 @@ celery_app.conf.update(
             "task": "app.workers.scheduled_tasks.schedule_tenant_stock_syncs",
             "schedule": 60.0,  # 1 minute
         },
+        # Queue product attribute syncs (name/price/category/VAT) every 5 min,
+        # actual per-tenant throttling happens inside the scheduler.
+        "tenant-product-sync-scheduler": {
+            "task": "app.workers.scheduled_tasks.schedule_tenant_product_syncs",
+            "schedule": 300.0,  # 5 minutes
+        },
         # Full stock sync daily at 3 AM
         "daily-stock-reconciliation": {
             "task": "app.workers.scheduled_tasks.daily_stock_reconciliation",
@@ -103,6 +112,7 @@ celery_app.conf.update(
         "app.workers.tasks.process_shopify_order": {"queue": "orders"},
         "app.workers.tasks.process_susoft_stock_change": {"queue": "stock"},
         "app.workers.tasks.sync_stock_to_shopify": {"queue": "stock"},
+        "app.workers.tasks.sync_products_to_shopify": {"queue": "products"},
         "app.workers.scheduled_tasks.*": {"queue": "scheduled"},
     },
     

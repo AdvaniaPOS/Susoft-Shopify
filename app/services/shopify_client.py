@@ -465,6 +465,58 @@ class ShopifyClient:
         """
         result = await self._rest_request("GET", f"/variants/{variant_id}.json")
         return result.get("variant", {})
+
+    async def update_product(
+        self,
+        product_id: str,
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Update a Shopify product (REST). Only the provided fields are sent.
+
+        Args:
+            product_id: Shopify product ID
+            fields: Dict of product fields to update, e.g.
+                ``{"title": "...", "product_type": "..."}``.
+
+        Returns:
+            Updated product data.
+        """
+        if not fields:
+            return {}
+        payload = {"product": {"id": int(product_id), **fields}}
+        result = await self._rest_request(
+            "PUT",
+            f"/products/{product_id}.json",
+            json_data=payload,
+        )
+        return result.get("product", {})
+
+    async def update_variant(
+        self,
+        variant_id: str,
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Update a Shopify variant (REST). Only the provided fields are sent.
+
+        Args:
+            variant_id: Shopify variant ID
+            fields: Dict of variant fields, e.g.
+                ``{"price": "199.00", "taxable": True, "metafields": [...]}``.
+
+        Returns:
+            Updated variant data.
+        """
+        if not fields:
+            return {}
+        payload = {"variant": {"id": int(variant_id), **fields}}
+        result = await self._rest_request(
+            "PUT",
+            f"/variants/{variant_id}.json",
+            json_data=payload,
+        )
+        return result.get("variant", {})
     
     # ===================
     # Inventory Operations

@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 import structlog
 
 from app.workers.celery_app import celery_app
-from app.workers.tasks import sync_stock_to_shopify
+from app.workers.tasks import sync_stock_to_shopify, sync_products_to_shopify, redis_client
 from app.core.config import settings
 from app.core.database import get_session_context
 from app.db.repositories import (
@@ -281,6 +281,62 @@ async def _schedule_tenant_stock_syncs_async():
             logger.info(
                 "Queued interval-based stock sync tasks",
                 tenant_count=queued_count
+            )
+
+
+# Default cadence for product attribute sync (name/price/category/VAT).
+# Susoft master data doesn't change as often as stock, so 30 min is a
+# reasonable balance between freshness and API load.
+PRODUCT_SYNC_INTERVAL_SECONDS = 30 * 60
+
+
+@celery_app.task
+def schedule_tenant_product_syncs():
+    """
+    Queue product attribute syncs for tenants whose last run is older than
+    ``PRODUCT_SYNC_INTERVAL_SECONDS``. Throttling state is kept in Redis
+    so we don't need a database migration for ``last_product_sync_at``.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _schedule_tenant_product_syncs_async()
+    )
+
+
+async def _schedule_tenant_product_syncs_async():
+    now = datetime.now(timezone.utc)
+
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+        tenants = await tenant_repo.get_tenants_with_sync_enabled()
+        queued_count = 0
+
+        for tenant in tenants:
+            tenant_id = str(tenant.id)
+            try:
+                last_raw = redis_client.get(f"product_sync:last:{tenant_id}")
+            except Exception:
+                last_raw = None
+
+            if last_raw:
+                try:
+                    last_dt = datetime.fromisoformat(last_raw.decode("utf-8"))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    if (now - last_dt).total_seconds() < PRODUCT_SYNC_INTERVAL_SECONDS:
+                        continue
+                except Exception:
+                    pass  # malformed marker, run anyway
+
+            sync_products_to_shopify.apply_async(
+                kwargs={"tenant_id": tenant_id},
+                queue="products",
+            )
+            queued_count += 1
+
+        if queued_count:
+            logger.info(
+                "Queued product attribute sync tasks",
+                tenant_count=queued_count,
             )
 
 

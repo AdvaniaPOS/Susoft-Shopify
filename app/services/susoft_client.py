@@ -594,6 +594,15 @@ class SusoftClient:
             endpoint=endpoint,
             has_payments=has_payments,
         )
+        try:
+            import json as _json
+            logger.warning(
+                "Susoft order payload (debug)",
+                shopify_order_id=shopify_order_id,
+                payload=_json.dumps(order_data, default=str)[:4000],
+            )
+        except Exception:
+            pass
 
         try:
             return await self._request(

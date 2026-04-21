@@ -612,15 +612,46 @@ class SusoftClient:
                 json_data=order_data,
             )
         except SusoftAPIError as exc:
-            # /order/pos is strict and may return 500 for fields it doesn't
-            # like. Fall back to /order so we don't lose the order entirely.
-            # Stock won't be deducted automatically in this case, but the
-            # order will at least exist in Susoft for manual processing.
+            err_str = str(exc)
+            # 409 = order already exists (idempotency). The previous attempt
+            # actually succeeded server-side; treat as success and look it up.
+            if "409" in err_str or "already exists" in err_str.lower():
+                logger.info(
+                    "Susoft order already exists; treating as success",
+                    shopify_order_id=shopify_order_id,
+                    alternative_id=order_data["alternativeId"],
+                )
+                existing = await self.get_order_by_alternative_id(
+                    order_data["alternativeId"]
+                )
+                if existing:
+                    return existing
+                return {"alternativeId": order_data["alternativeId"], "status": "exists"}
+
+            # /order/pos may return 500/400 for fields it doesn't like, or
+            # 404 from an internal post-step even though the order WAS created.
+            # Check if the order exists before falling back to avoid duplicate
+            # creation attempts.
             if use_pos_endpoint and endpoint == "/order/pos":
+                try:
+                    existing = await self.get_order_by_alternative_id(
+                        order_data["alternativeId"]
+                    )
+                    if existing:
+                        logger.info(
+                            "/order/pos returned error but order was created",
+                            shopify_order_id=shopify_order_id,
+                            alternative_id=order_data["alternativeId"],
+                            error=err_str,
+                        )
+                        return existing
+                except Exception:
+                    pass
+
                 logger.warning(
                     "/order/pos failed, falling back to /order",
                     shopify_order_id=shopify_order_id,
-                    error=str(exc),
+                    error=err_str,
                 )
                 order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
                 return await self._request(

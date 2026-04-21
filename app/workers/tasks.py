@@ -707,14 +707,13 @@ async def _build_susoft_order(
     # Build the order (per Susoft Order schema)
     now_dt = datetime.now(timezone.utc)
     now_iso_dt = now_dt.strftime("%Y-%m-%dT%H:%M:%S.000")
-    today_iso_date = now_dt.strftime("%Y-%m-%d")
     susoft_order = {
         "shopId": susoft_shop_id,
         "orderDateTime": now_iso_dt,
         "pickupDateTime": now_iso_dt,
-        "deliveryDate": today_iso_date,
-        "invoiceDate": today_iso_date,
-        "invoiceDueDate": today_iso_date,
+        "deliveryDate": now_iso_dt,
+        "invoiceDate": now_iso_dt,
+        "invoiceDueDate": now_iso_dt,
         "customer": susoft_customer,
         "deliveryAddress": susoft_address,
         "invoiceAddress": susoft_address,

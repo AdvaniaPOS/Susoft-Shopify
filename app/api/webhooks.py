@@ -299,8 +299,8 @@ async def susoft_stock_changed(
         )
         raise HTTPException(status_code=404, detail="Tenant not found")
     
-    # Verify Susoft webhook token
-    if authorization:
+    # Verify Susoft webhook token (only if both header and tenant secret exist)
+    if authorization and tenant.susoft_webhook_secret_encrypted:
         # Extract token from "Bearer <token>" format
         token = authorization.replace("Bearer ", "").strip()
         

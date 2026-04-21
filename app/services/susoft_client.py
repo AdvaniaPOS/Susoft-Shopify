@@ -621,12 +621,28 @@ class SusoftClient:
                     shopify_order_id=shopify_order_id,
                     alternative_id=order_data["alternativeId"],
                 )
-                existing = await self.get_order_by_alternative_id(
-                    order_data["alternativeId"]
-                )
-                if existing:
-                    return existing
-                return {"alternativeId": order_data["alternativeId"], "status": "exists"}
+                # 409002 from Susoft is itself proof the order exists. Try
+                # to fetch it for the response payload, but NEVER let a
+                # lookup failure (500/timeout) re-raise and turn this into
+                # a celery retry — that would just loop forever.
+                try:
+                    existing = await self.get_order_by_alternative_id(
+                        order_data["alternativeId"]
+                    )
+                    if existing:
+                        return existing
+                except Exception as lookup_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Susoft lookup after 409 failed; returning stub success",
+                        shopify_order_id=shopify_order_id,
+                        alternative_id=order_data["alternativeId"],
+                        lookup_error=str(lookup_exc),
+                    )
+                return {
+                    "alternativeId": order_data["alternativeId"],
+                    "status": "exists",
+                    "duplicate": True,
+                }
 
             # /order/pos may return 500/400 for fields it doesn't like, or
             # 404 from an internal post-step even though the order WAS created.

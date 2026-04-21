@@ -88,7 +88,16 @@ async def diagnose(tenant_id: str, only_mismatch: bool) -> int:
             print(f"  Got {len(susoft_products)} products")
             stock_lookup = _build_susoft_stock_lookup(susoft_products)
 
-            # Fetch Shopify inventory levels in chunks of 50
+            # Fetch all Shopify locations so we can also report stock that lives
+            # at locations other than the tenant's default.
+            locations = await shopify_client.get_locations()
+            location_ids = [str(loc.get("id")) for loc in locations if loc.get("id")]
+            location_names = {
+                str(loc.get("id")): loc.get("name", "?") for loc in locations
+            }
+            print(f"  Shopify locations: {len(location_ids)} -> {location_names}")
+
+            # Fetch Shopify inventory levels in chunks of 50, scoped to all locations
             inv_lookup: Dict[str, Dict[str, int]] = {}
             inv_ids = [
                 str(m.shopify_inventory_item_id)
@@ -98,16 +107,31 @@ async def diagnose(tenant_id: str, only_mismatch: bool) -> int:
             print(f"Fetching Shopify inventory levels for {len(inv_ids)} items...")
             for i in range(0, len(inv_ids), 50):
                 chunk = inv_ids[i : i + 50]
-                levels = await shopify_client.get_inventory_levels(chunk)
+                levels = await shopify_client.get_inventory_levels(
+                    chunk, location_ids=location_ids or None
+                )
                 for lvl in levels:
                     iid = str(lvl.get("inventory_item_id"))
                     lid = str(lvl.get("location_id"))
                     inv_lookup.setdefault(iid, {})[lid] = int(lvl.get("available") or 0)
 
+            # Also fetch each variant directly to get the rolled-up inventory_quantity
+            # (what users see on the Shopify product page).
+            variant_qty: Dict[str, int] = {}
+            for m in mappings:
+                vid = str(m.shopify_variant_id) if m.shopify_variant_id else None
+                if not vid:
+                    continue
+                try:
+                    v = await shopify_client.get_variant(vid)
+                    variant_qty[vid] = int(v.get("inventory_quantity") or 0)
+                except Exception as e:  # pragma: no cover
+                    print(f"  ! Failed to fetch variant {vid}: {e}")
+
             # Print table
             header = (
                 f"{'SKU':<20} {'SusoftID':<14} {'liveSus':>8} "
-                f"{'dbSus':>6} {'dbShop':>6} {'liveShop':>9} {'safety':>7} {'expectedShop':>12}  status"
+                f"{'dbSus':>6} {'dbShop':>6} {'liveShop':>9} {'varQty':>7} {'safety':>7} {'expectedShop':>12}  status"
             )
             print()
             print(header)
@@ -124,20 +148,34 @@ async def diagnose(tenant_id: str, only_mismatch: bool) -> int:
                 expected = max(0, (live_sus or 0) - safety) if live_sus is not None else None
                 expected_str = "?" if expected is None else str(expected)
 
-                shop_loc = m.shopify_location_id or tenant.shopify_default_location_id
-                live_shop = None
-                if m.shopify_inventory_item_id and shop_loc:
-                    live_shop = inv_lookup.get(str(m.shopify_inventory_item_id), {}).get(str(shop_loc))
-                live_shop_str = "?" if live_shop is None else str(live_shop)
+                # Sum stock across all known locations for this inventory item
+                inv_at = inv_lookup.get(str(m.shopify_inventory_item_id), {})
+                if inv_at:
+                    live_shop = sum(inv_at.values())
+                    # Also build per-location detail
+                    detail = ",".join(
+                        f"{location_names.get(lid, lid)}={qty}"
+                        for lid, qty in inv_at.items()
+                    )
+                else:
+                    live_shop = None
+                    detail = ""
+                live_shop_str = "?" if live_shop is None else f"{live_shop}({detail})" if detail else str(live_shop)
+
+                vqty = variant_qty.get(str(m.shopify_variant_id))
+                vqty_str = "?" if vqty is None else str(vqty)
 
                 status = "OK"
                 if live_sus is None:
                     status = "NO_SUSOFT"
-                elif live_shop is None:
+                elif live_shop is None and vqty is None:
                     status = "NO_SHOPIFY_LEVEL"
-                elif expected != live_shop:
-                    status = f"DRIFT(diff={live_shop - (expected or 0)})"
-                    mismatches += 1
+                else:
+                    # Prefer variant-level rollup if inventory_levels was empty
+                    compare_to = live_shop if live_shop is not None else vqty
+                    if expected != compare_to:
+                        status = f"DRIFT(diff={(compare_to or 0) - (expected or 0)})"
+                        mismatches += 1
 
                 if only_mismatch and status == "OK":
                     continue
@@ -145,7 +183,7 @@ async def diagnose(tenant_id: str, only_mismatch: bool) -> int:
                 print(
                     f"{(m.sku or '')[:20]:<20} {susoft_key[:14]:<14} {live_sus_str:>8} "
                     f"{m.current_susoft_stock:>6} {m.current_shopify_stock:>6} "
-                    f"{live_shop_str:>9} {safety:>7} {expected_str:>12}  {status}"
+                    f"{live_shop_str:>30} {vqty_str:>7} {safety:>7} {expected_str:>12}  {status}"
                 )
 
             print()

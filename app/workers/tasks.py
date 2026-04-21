@@ -640,11 +640,18 @@ async def _build_susoft_order(
                 sku=sku,
             )
 
+        qty = item.get("quantity", 1) or 1
+        unit_price = _parse_float(item.get("price", 0))
+        line_discount = _parse_float(item.get("total_discount", 0))
+        line_total = round(unit_price * qty - line_discount, 2)
         lines.append({
             "product": product_ref,
             "barcode": sku,
-            "quantity": item.get("quantity", 1),
-            "unitPrice": float(item.get("price", 0)),
+            "quantity": qty,
+            "unitPrice": unit_price,
+            "price": unit_price,
+            "total": line_total,
+            "discountAmount": line_discount,
             "text": item.get("name"),
         })
 
@@ -681,6 +688,8 @@ async def _build_susoft_order(
             "barcode": shipping_sku,
             "quantity": 1,
             "unitPrice": shipping_amount,
+            "price": shipping_amount,
+            "total": shipping_amount,
             "text": shipping_name or "Frakt",
         })
     

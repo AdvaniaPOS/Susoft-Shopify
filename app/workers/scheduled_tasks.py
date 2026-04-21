@@ -43,7 +43,7 @@ def check_stuck_tasks():
     """
     Check for tasks stuck in processing state for too long.
     
-    Alert threshold is configurable via settings.alert_threshold_minutes.
+    Alert threshold is configurable via settings.alert_queue_timeout_minutes.
     """
     asyncio.get_event_loop().run_until_complete(
         _check_stuck_tasks_async()
@@ -52,7 +52,7 @@ def check_stuck_tasks():
 
 async def _check_stuck_tasks_async():
     """Async implementation of stuck task checker."""
-    threshold = timedelta(minutes=settings.alert_threshold_minutes)
+    threshold = timedelta(minutes=settings.alert_queue_timeout_minutes)
     cutoff_time = datetime.now(timezone.utc) - threshold
     
     async with get_session_context() as session:
@@ -69,7 +69,7 @@ async def _check_stuck_tasks_async():
         logger.warning(
             "Found stuck tasks",
             count=len(stuck_items),
-            threshold_minutes=settings.alert_threshold_minutes
+            threshold_minutes=settings.alert_queue_timeout_minutes
         )
         
         # Group by tenant for alerting
@@ -85,7 +85,7 @@ async def _check_stuck_tasks_async():
             message = format_stuck_task_alert(
                 tenant_id=tenant_id,
                 stuck_tasks=items,
-                threshold_minutes=settings.alert_threshold_minutes
+                threshold_minutes=settings.alert_queue_timeout_minutes
             )
             
             await send_slack_notification(message)

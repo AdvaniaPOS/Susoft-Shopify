@@ -138,9 +138,20 @@ class SusoftClient:
             if isinstance(parsed, dict) and parsed.get("login") and parsed.get("password"):
                 self._login = parsed["login"]
                 self._password = parsed["password"]
+                logger.info(
+                    "Susoft client will use login/password auth",
+                    login=self._login,
+                    shop_url_key=self.shop_url_key,
+                )
             else:
                 # Treat as literal token (backward compatible).
                 self._token = raw_secret
+                logger.warning(
+                    "Susoft client using literal-token auth (no login/password found). "
+                    "If you see 401, re-seed the tenant so the secret holds JSON {login,password}.",
+                    shop_url_key=self.shop_url_key,
+                    secret_preview=(raw_secret[:6] + "...") if raw_secret else "<empty>",
+                )
 
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
@@ -194,6 +205,12 @@ class SusoftClient:
                 response_body=data,
             )
         self._token = token
+        logger.info(
+            "Susoft authentication succeeded",
+            login=self._login,
+            shop_url_key=self.shop_url_key,
+            token_preview=(token[:12] + "...") if token else None,
+        )
     
     async def close(self) -> None:
         """Close the HTTP client."""

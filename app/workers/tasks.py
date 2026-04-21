@@ -584,59 +584,69 @@ async def _build_susoft_order(
         return "TERMINAL"
     
     # Extract customer info
-    customer = order_data.get("customer", {})
-    shipping = order_data.get("shipping_address", {})
-    
-    # Build customer for Susoft
-    susoft_customer = {
-        "name": f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip(),
-        "email": customer.get("email"),
-        "phone": customer.get("phone"),
-        "address": {
-            "street": shipping.get("address1", ""),
-            "street2": shipping.get("address2", ""),
-            "city": shipping.get("city", ""),
-            "zip": shipping.get("zip", ""),
-            "country": shipping.get("country_code", "NO")
-        }
+    customer = order_data.get("customer", {}) or {}
+    shipping = order_data.get("shipping_address", {}) or {}
+    billing = order_data.get("billing_address", {}) or {}
+
+    # Build customer for Susoft (per Susoft Customer/Address schema).
+    # `lastName` is required; fall back to a sensible default for anonymous orders.
+    first_name = (customer.get("first_name") or shipping.get("first_name") or billing.get("first_name") or "").strip()
+    last_name = (customer.get("last_name") or shipping.get("last_name") or billing.get("last_name") or "").strip()
+    if not last_name:
+        last_name = first_name or "Shopify Customer"
+        first_name = "" if last_name == first_name else first_name
+
+    addr_src = shipping or billing
+    susoft_address = {
+        "addressLine1": addr_src.get("address1", "") or "",
+        "addressLine2": addr_src.get("address2", "") or "",
+        "city": addr_src.get("city", "") or "",
+        "zipCode": addr_src.get("zip", "") or "",
+        "countryCode": addr_src.get("country_code", "NO") or "NO",
+        "name": (f"{first_name} {last_name}".strip() or last_name),
+        "email": customer.get("email") or order_data.get("email"),
+        "mobilePhone": customer.get("phone") or addr_src.get("phone"),
     }
-    
-    # Build line items
+    susoft_customer = {
+        "firstName": first_name,
+        "lastName": last_name,
+        "displayName": f"{first_name} {last_name}".strip() or last_name,
+        "address": susoft_address,
+        "deliveryAddress": susoft_address,
+        "invoiceAddress": susoft_address,
+    }
+
+    # Build line items (per Susoft OrderLine schema: nested `product`, `text`, no `sku`/`productUuid`)
     lines = []
     for item in order_data.get("line_items", []):
         sku = item.get("sku")
-        
+
         if not sku:
             logger.warning(
                 "Skipping line item without SKU",
                 variant_id=item.get("variant_id")
             )
             continue
-        
-        # Look up Susoft product by SKU
+
         mapping = await mapping_repo.get_by_sku(tenant_id, sku)
-        
-        if not mapping:
-            logger.warning(
-                "No product mapping found for SKU",
-                tenant_id=tenant_id,
-                sku=sku
-            )
-            # Create line with just SKU, let Susoft handle lookup
-            lines.append({
-                "sku": sku,
-                "quantity": item.get("quantity", 1),
-                "unitPrice": float(item.get("price", 0)),
-                "description": item.get("name")
-            })
+
+        product_ref: Dict[str, Any] = {"barcode": sku}
+        if mapping and mapping.susoft_product_id:
+            product_ref["id"] = mapping.susoft_product_id
         else:
-            lines.append({
-                "productUuid": mapping.susoft_product_id,
-                "sku": sku,
-                "quantity": item.get("quantity", 1),
-                "unitPrice": float(item.get("price", 0)),
-                "description": item.get("name")
-            })
+            logger.warning(
+                "No product mapping found for SKU; sending barcode only",
+                tenant_id=tenant_id,
+                sku=sku,
+            )
+
+        lines.append({
+            "product": product_ref,
+            "barcode": sku,
+            "quantity": item.get("quantity", 1),
+            "unitPrice": float(item.get("price", 0)),
+            "text": item.get("name"),
+        })
 
     # Susoft API currently ignores shippingAmount/shippingName on create,
     # so we optionally model shipping as an explicit order line instead.
@@ -656,32 +666,33 @@ async def _build_susoft_order(
     shipping_sku = settings.shopify_shipping_sku
     if shipping_amount > 0 and shipping_sku:
         shipping_mapping = await mapping_repo.get_by_sku(tenant_id, shipping_sku)
-        shipping_line = {
-            "sku": shipping_sku,
-            "quantity": 1,
-            "unitPrice": shipping_amount,
-            "description": shipping_name or "Frakt",
-        }
-
-        if shipping_mapping:
-            shipping_line["productUuid"] = shipping_mapping.susoft_product_id
+        shipping_product: Dict[str, Any] = {"barcode": shipping_sku}
+        if shipping_mapping and shipping_mapping.susoft_product_id:
+            shipping_product["id"] = shipping_mapping.susoft_product_id
         else:
             logger.warning(
-                "Shipping SKU has no mapping; sending shipping line with SKU only",
+                "Shipping SKU has no mapping; sending shipping line with barcode only",
                 tenant_id=tenant_id,
                 shipping_sku=shipping_sku,
             )
 
-        lines.append(shipping_line)
+        lines.append({
+            "product": shipping_product,
+            "barcode": shipping_sku,
+            "quantity": 1,
+            "unitPrice": shipping_amount,
+            "text": shipping_name or "Frakt",
+        })
     
-    # Build the order
+    # Build the order (per Susoft Order schema)
     susoft_order = {
         "customer": susoft_customer,
+        "deliveryAddress": susoft_address,
+        "invoiceAddress": susoft_address,
         "lines": lines,
-        "orderNumber": order_data.get("name", ""),
-        "note": order_data.get("note", ""),
-        "currency": order_data.get("currency", "NOK"),
-        "totalPrice": _parse_float(order_data.get("total_price", 0)),
+        "customerReference": order_data.get("name", ""),
+        "note": order_data.get("note", "") or "",
+        "currencyCode": order_data.get("currency", "NOK"),
     }
 
     financial_status = str(order_data.get("financial_status", "")).lower()

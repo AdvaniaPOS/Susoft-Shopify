@@ -230,6 +230,61 @@ async def _daily_stock_reconciliation_async():
 
 
 @celery_app.task
+def schedule_tenant_stock_syncs():
+    """
+    Queue stock sync for tenants that are due based on sync_interval_seconds.
+
+    This is the main automation loop for stock sync between Susoft and Shopify.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        _schedule_tenant_stock_syncs_async()
+    )
+
+
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize naive/aware datetimes to UTC for safe comparisons."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _schedule_tenant_stock_syncs_async():
+    """Async implementation of interval-based tenant stock scheduler."""
+    now = datetime.now(timezone.utc)
+
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+
+        tenants = await tenant_repo.get_tenants_with_sync_enabled()
+        queued_count = 0
+
+        for tenant in tenants:
+            interval = max(60, int(getattr(tenant, "sync_interval_seconds", 300) or 300))
+
+            last_stock_sync = getattr(tenant, "last_stock_sync_at", None)
+            last_sync = getattr(tenant, "last_sync_at", None)
+            reference_time = last_stock_sync or last_sync
+
+            if reference_time:
+                reference_time = _to_utc(reference_time)
+                age_seconds = (now - reference_time).total_seconds()
+                if age_seconds < interval:
+                    continue
+
+            sync_stock_to_shopify.apply_async(
+                kwargs={"tenant_id": str(tenant.id)},
+                queue="stock"
+            )
+            queued_count += 1
+
+        if queued_count:
+            logger.info(
+                "Queued interval-based stock sync tasks",
+                tenant_count=queued_count
+            )
+
+
+@celery_app.task
 def cleanup_old_sync_logs():
     """
     Clean up old sync logs to prevent database bloat.

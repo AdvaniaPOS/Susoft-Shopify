@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import structlog
 
 from app.core.config import settings
@@ -27,10 +27,38 @@ from app.db.repositories import (
     DeadLetterQueueRepository,
     IntegrationQueueRepository
 )
+from app.services.shopify_webhooks import reconcile_tenant_webhooks
 from app.workers.tasks import sync_stock_to_shopify, retry_dlq_item
 
 
 logger = structlog.get_logger()
+
+
+async def _reconcile_webhooks_for_tenant(tenant) -> Optional[dict]:
+    """Best-effort Shopify webhook reconciliation. Returns result dict or None.
+
+    Skips silently when ``webhook_base_url`` is not configured. All errors are
+    swallowed and logged - failure to register webhooks must not break tenant
+    administration.
+    """
+    base_url = settings.webhook_base_url
+    if not base_url or not settings.auto_register_webhooks:
+        return None
+    try:
+        result = await reconcile_tenant_webhooks(tenant, base_url=base_url)
+        logger.info(
+            "Shopify webhooks reconciled",
+            tenant_id=str(tenant.id),
+            **result.to_dict()["summary"],
+        )
+        return result.to_dict()
+    except Exception as exc:  # noqa: BLE001 - best effort
+        logger.exception(
+            "Shopify webhook reconciliation failed",
+            tenant_id=str(tenant.id),
+            error=str(exc),
+        )
+        return {"error": str(exc)}
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -44,18 +72,28 @@ async def verify_admin_key(
     x_admin_api_key: str = Header(None)
 ) -> bool:
     """Verify admin API key from header."""
+    configured = settings.admin_api_key
+    if configured is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin API is disabled: ADMIN_API_KEY is not configured."
+        )
+
     if not x_admin_api_key:
         raise HTTPException(
             status_code=401,
             detail="Missing X-Admin-Api-Key header"
         )
-    
-    if x_admin_api_key != settings.admin_api_key:
+
+    expected = configured.get_secret_value()
+    # Constant-time comparison to avoid timing oracles.
+    import hmac
+    if not hmac.compare_digest(x_admin_api_key, expected):
         raise HTTPException(
             status_code=403,
             detail="Invalid admin API key"
         )
-    
+
     return True
 
 
@@ -101,9 +139,13 @@ class TenantResponse(BaseModel):
     last_order_sync_at: Optional[datetime]
     last_stock_sync_at: Optional[datetime]
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
 
 
 class TenantStatus(BaseModel):
@@ -117,6 +159,11 @@ class TenantStatus(BaseModel):
     pending_tasks: int
     failed_tasks_24h: int
     dlq_items: int
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
 
 
 class ProductMappingCreate(BaseModel):
@@ -232,7 +279,10 @@ async def create_tenant(
     )
     
     logger.info("Tenant created", tenant_id=str(tenant.id), name=tenant_data.name)
-    
+
+    # Best-effort: register Shopify webhooks for the new tenant.
+    await _reconcile_webhooks_for_tenant(tenant)
+
     return TenantResponse.model_validate(tenant)
 
 
@@ -350,6 +400,72 @@ async def deactivate_tenant(
 
 
 # ===================
+# Shopify Webhook Registration
+# ===================
+
+
+@router.post("/tenants/{tenant_id}/webhooks/register")
+async def register_tenant_webhooks(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key)
+):
+    """Reconcile (idempotently create / update) Shopify webhooks for a tenant.
+
+    Requires ``WEBHOOK_BASE_URL`` to be configured. Safe to call repeatedly -
+    webhooks already pointing to the correct address are kept as-is.
+    """
+    if not settings.webhook_base_url:
+        raise HTTPException(
+            status_code=400,
+            detail="webhook_base_url is not configured; set WEBHOOK_BASE_URL to enable.",
+        )
+
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    from app.services.shopify_webhooks import reconcile_tenant_webhooks
+    result = await reconcile_tenant_webhooks(
+        tenant,
+        base_url=settings.webhook_base_url,
+    )
+    return result.to_dict()
+
+
+@router.get("/tenants/{tenant_id}/webhooks")
+async def list_tenant_webhooks(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key)
+):
+    """List Shopify webhook subscriptions currently registered on the tenant's shop."""
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    from app.services.shopify_client import ShopifyClient
+    client = ShopifyClient(
+        shop_url=tenant.shopify_shop_url,
+        access_token_encrypted=tenant.shopify_access_token_encrypted,
+        api_key_encrypted=getattr(tenant, "shopify_api_key_encrypted", None),
+        api_secret_encrypted=getattr(tenant, "shopify_api_secret_encrypted", None),
+    )
+    async with client:
+        webhooks = await client.list_webhooks()
+
+    return {
+        "tenant_id": tenant_id,
+        "shop_url": tenant.shopify_shop_url,
+        "configured_base_url": settings.webhook_base_url,
+        "count": len(webhooks),
+        "webhooks": webhooks,
+    }
+
+
+# ===================
 # Product Mappings
 # ===================
 
@@ -451,6 +567,37 @@ async def trigger_stock_sync(
     logger.info("Manual stock sync triggered", tenant_id=tenant_id)
     
     return {"status": "queued"}
+
+
+@router.post("/tenants/{tenant_id}/orders/{shopify_order_id}/close-after-susoft")
+async def close_order_after_susoft(
+    tenant_id: str,
+    shopify_order_id: str,
+    susoft_uuid: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key),
+):
+    """Manually replay the post-Susoft success actions on a Shopify order.
+
+    Useful when the original webhook task succeeded in Susoft but the close /
+    tag step failed (network blip, Shopify rate-limit, etc.). Tags the order,
+    appends a Susoft note and closes it (if the tenant has the close flag on).
+    """
+    from app.workers.tasks import _post_susoft_success_actions  # local import
+
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    fake_result: Dict[str, Any] = {"uuid": susoft_uuid} if susoft_uuid else {}
+    await _post_susoft_success_actions(
+        tenant=tenant,
+        shopify_order_id=shopify_order_id,
+        shopify_order_name=f"#{shopify_order_id}",
+        susoft_result=fake_result,
+    )
+    return {"status": "ok", "tenant_id": tenant_id, "order_id": shopify_order_id}
 
 
 @router.get("/tenants/{tenant_id}/sync-logs", response_model=List[SyncLogResponse])

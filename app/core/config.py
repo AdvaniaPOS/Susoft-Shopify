@@ -6,7 +6,7 @@ All sensitive values are loaded from environment variables.
 """
 
 from functools import lru_cache
-from typing import Optional
+from typing import List, Optional, Union
 from pydantic import Field, field_validator, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -92,6 +92,36 @@ class Settings(BaseSettings):
     admin_username: str = Field(default="admin", description="Admin portal username")
     admin_password: SecretStr = Field(..., description="Admin portal password")
     admin_session_timeout_minutes: int = Field(default=60, description="Admin session timeout")
+    admin_api_key: Optional[SecretStr] = Field(
+        default=None,
+        description="API key required by /admin endpoints via X-Admin-Api-Key header."
+    )
+
+    # ===================
+    # HTTP / CORS
+    # ===================
+    cors_origins: Union[List[str], str] = Field(
+        default_factory=list,
+        description=(
+            "Allowed CORS origins. Accepts a JSON array, comma-separated string, "
+            "or '*' for all origins."
+        ),
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, v):
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            v = v.strip()
+            if v == "*":
+                return ["*"]
+            if v.startswith("["):
+                import json
+                return json.loads(v)
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
     
     # ===================
     # Logging Settings
@@ -105,6 +135,44 @@ class Settings(BaseSettings):
     # ===================
     susoft_rate_limit_per_second: float = Field(default=5.0, ge=0.1, le=100, description="Susoft API rate limit")
     shopify_rate_limit_per_second: float = Field(default=2.0, ge=0.1, le=40, description="Shopify API rate limit")
+
+    # ===================
+    # Sync Behavior
+    # ===================
+    shopify_shipping_sku: Optional[str] = Field(
+        default=None,
+        description="Optional SKU in Susoft used to represent Shopify shipping as an order line"
+    )
+
+    # ===================
+    # Webhook Registration
+    # ===================
+    webhook_base_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Public base URL where this service receives webhooks "
+            "(e.g. https://sync.example.com). Used to auto-register Shopify "
+            "webhook subscriptions. Leave unset to disable auto-registration."
+        )
+    )
+    auto_register_webhooks: bool = Field(
+        default=True,
+        description="Automatically reconcile Shopify webhooks on tenant create / app startup."
+    )
+    register_webhooks_on_startup: bool = Field(
+        default=False,
+        description="If true, reconcile webhooks for all active tenants on application startup."
+    )
+
+    @field_validator("webhook_base_url")
+    @classmethod
+    def validate_webhook_base_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        v = v.rstrip("/")
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("webhook_base_url must start with http:// or https://")
+        return v
     
     # ===================
     # Health Check
@@ -140,6 +208,11 @@ class Settings(BaseSettings):
     # ===================
     # Properties
     # ===================
+    @property
+    def environment(self) -> str:
+        """Alias for ``app_env`` so callers can use ``settings.environment``."""
+        return self.app_env
+
     @property
     def is_production(self) -> bool:
         """Check if running in production environment."""

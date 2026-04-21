@@ -39,6 +39,28 @@ logger = structlog.get_logger()
 SHOPIFY_API_VERSION = "2024-01"
 
 
+def _next_link_from_header(link_header: Optional[str]) -> Optional[str]:
+    """Parse a Shopify ``Link`` response header and return the ``rel="next"`` URL.
+
+    Shopify uses standard RFC 5988 link headers for cursor pagination, e.g.::
+
+        Link: <https://shop.myshopify.com/admin/api/2024-01/products.json?page_info=abc&limit=250>; rel="next"
+
+    Returns ``None`` if there is no next page.
+    """
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segments = part.strip().split(";")
+        if len(segments) < 2:
+            continue
+        url_segment = segments[0].strip()
+        rel_segment = ";".join(segments[1:]).strip()
+        if 'rel="next"' in rel_segment and url_segment.startswith("<") and url_segment.endswith(">"):
+            return url_segment[1:-1]
+    return None
+
+
 class ShopifyAPIError(Exception):
     """Base exception for Shopify API errors."""
     
@@ -375,6 +397,61 @@ class ShopifyClient:
             f"/products/{product_id}/variants.json"
         )
         return result.get("variants", [])
+
+    async def get_all_products(
+        self,
+        page_size: int = 250,
+        fields: Optional[str] = None,
+        max_pages: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch every product in the shop using cursor pagination.
+
+        Uses the Shopify REST ``Link`` header (since API version 2019-07).
+        Each product object includes its variants (with ``sku`` and
+        ``inventory_item_id``), which is what we need to build product mappings.
+
+        Args:
+            page_size: Items per page (Shopify allows up to 250).
+            fields: Optional comma-separated list of fields to request
+                (e.g. ``"id,title,variants"``) to reduce payload size.
+            max_pages: Safety limit on total pages fetched.
+
+        Returns:
+            Flat list of all product dicts.
+        """
+        await self._ensure_client()
+
+        params: Dict[str, Any] = {"limit": min(max(page_size, 1), 250)}
+        if fields:
+            params["fields"] = fields
+
+        url: Optional[str] = f"{self.rest_base_url}/products.json"
+        all_products: List[Dict[str, Any]] = []
+        page_count = 0
+
+        while url and page_count < max_pages:
+            await self._rate_limit_wait()
+            response = await self._client.get(url, params=params if page_count == 0 else None)
+
+            if response.status_code == 401:
+                raise ShopifyAuthenticationError("Authentication failed", status_code=401)
+            if response.status_code == 429:
+                raise ShopifyRateLimitError("Rate limited", status_code=429)
+            if response.status_code >= 400:
+                raise ShopifyAPIError(
+                    f"API error: {response.status_code}",
+                    status_code=response.status_code,
+                    response_body=response.json() if response.content else None,
+                )
+
+            body = response.json() if response.content else {}
+            all_products.extend(body.get("products", []))
+            page_count += 1
+
+            url = _next_link_from_header(response.headers.get("Link") or response.headers.get("link"))
+
+        return all_products
     
     async def get_variant(self, variant_id: str) -> Dict[str, Any]:
         """
@@ -612,7 +689,118 @@ class ShopifyClient:
             params=params
         )
         return result.get("orders", [])
-    
+
+    async def update_order(
+        self,
+        order_id: str,
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update arbitrary fields on a Shopify order (PUT /orders/{id}.json)."""
+        body = {"order": {"id": int(order_id), **fields}}
+        result = await self._rest_request(
+            "PUT", f"/orders/{order_id}.json", json_data=body
+        )
+        return result.get("order", {})
+
+    async def add_order_tags(
+        self,
+        order_id: str,
+        new_tags: List[str],
+    ) -> Dict[str, Any]:
+        """Append tags to an order without removing existing ones.
+
+        Shopify stores ``tags`` as a comma-separated string. We fetch current
+        tags, merge in ``new_tags`` (case-insensitive de-dupe) and PUT back.
+        """
+        existing = await self.get_order(order_id)
+        existing_tags_raw = (existing.get("tags") or "").strip()
+        existing_tags = [t.strip() for t in existing_tags_raw.split(",") if t.strip()]
+        seen = {t.lower() for t in existing_tags}
+        for t in new_tags:
+            if t and t.lower() not in seen:
+                existing_tags.append(t)
+                seen.add(t.lower())
+        return await self.update_order(order_id, {"tags": ", ".join(existing_tags)})
+
+    async def append_order_note(
+        self,
+        order_id: str,
+        note_line: str,
+    ) -> Dict[str, Any]:
+        """Append a line to the order's note (preserving the existing note)."""
+        existing = await self.get_order(order_id)
+        current = (existing.get("note") or "").rstrip()
+        merged = f"{current}\n{note_line}".strip() if current else note_line
+        return await self.update_order(order_id, {"note": merged})
+
+    async def close_order(self, order_id: str) -> Dict[str, Any]:
+        """Close an order so it is removed from the open-orders queue.
+
+        See https://shopify.dev/docs/api/admin-rest/2024-01/resources/order#post-orders-order-id-close
+        """
+        result = await self._rest_request(
+            "POST", f"/orders/{order_id}/close.json"
+        )
+        return result.get("order", {})
+
+    async def reopen_order(self, order_id: str) -> Dict[str, Any]:
+        """Re-open a previously closed order."""
+        result = await self._rest_request(
+            "POST", f"/orders/{order_id}/open.json"
+        )
+        return result.get("order", {})
+
+    # ===================
+    # Fulfillment Operations
+    # ===================
+
+    async def list_fulfillment_orders(self, order_id: str) -> List[Dict[str, Any]]:
+        """List fulfillment orders for a Shopify order.
+
+        See https://shopify.dev/docs/api/admin-rest/2024-01/resources/fulfillmentorder
+        """
+        result = await self._rest_request(
+            "GET", f"/orders/{order_id}/fulfillment_orders.json"
+        )
+        return result.get("fulfillment_orders", [])
+
+    async def create_fulfillment(
+        self,
+        fulfillment_order_id: str,
+        tracking_number: Optional[str] = None,
+        tracking_company: Optional[str] = None,
+        tracking_url: Optional[str] = None,
+        notify_customer: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a fulfillment for a single fulfillment order.
+
+        Uses the 2024-01 fulfillment API which is required for new apps.
+        See https://shopify.dev/docs/api/admin-rest/2024-01/resources/fulfillment#post-fulfillments
+        """
+        line_items_by_fo: Dict[str, Any] = {
+            "fulfillment_order_id": int(fulfillment_order_id),
+        }
+        body: Dict[str, Any] = {
+            "fulfillment": {
+                "line_items_by_fulfillment_order": [line_items_by_fo],
+                "notify_customer": notify_customer,
+            }
+        }
+        tracking_info: Dict[str, Any] = {}
+        if tracking_number:
+            tracking_info["number"] = tracking_number
+        if tracking_company:
+            tracking_info["company"] = tracking_company
+        if tracking_url:
+            tracking_info["url"] = tracking_url
+        if tracking_info:
+            body["fulfillment"]["tracking_info"] = tracking_info
+
+        result = await self._rest_request(
+            "POST", "/fulfillments.json", json_data=body
+        )
+        return result.get("fulfillment", {})
+
     # ===================
     # Webhook Operations
     # ===================

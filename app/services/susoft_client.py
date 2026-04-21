@@ -339,6 +339,40 @@ class SusoftClient:
             }
         )
     
+    async def get_all_products(
+        self,
+        page_size: int = 200,
+        max_pages: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch every product from Susoft by paging through ``/product/list/modified``
+        starting from the Unix epoch.
+
+        Args:
+            page_size: Items per page.
+            max_pages: Safety cap on total pages.
+
+        Returns:
+            Flat list of product dicts (each contains ``id``, ``barcode``,
+            optional embedded ``stock``, etc.).
+        """
+        epoch = datetime(1970, 1, 1)
+        all_products: List[Dict[str, Any]] = []
+        page = 0
+        while page < max_pages:
+            batch = await self.get_products_modified_since(
+                since=epoch,
+                page=page,
+                page_size=page_size,
+            )
+            if not batch:
+                break
+            all_products.extend(batch)
+            if len(batch) < page_size:
+                break
+            page += 1
+        return all_products
+
     # ===================
     # Stock Operations
     # ===================
@@ -623,22 +657,34 @@ class SusoftClient:
 
 def create_susoft_client(
     base_url: str,
-    shop_url_key: str,
-    api_key_encrypted: str
+    api_key_encrypted: str,
+    integration_id: Optional[str] = None,
+    shop_url_key: Optional[str] = None,
 ) -> SusoftClient:
     """
     Factory function to create a Susoft client.
-    
+
+    Susoft requires the ``X-Shop-Url-Key`` header for all requests; in this
+    project that value is stored as ``Tenant.susoft_integration_id``. Both
+    ``integration_id`` and ``shop_url_key`` are accepted (alias) so callers
+    can use whichever name fits their context.
+
     Args:
         base_url: Susoft API base URL
-        shop_url_key: Shop URL key
         api_key_encrypted: Encrypted API key
-        
+        integration_id: Susoft integration / shop URL key (preferred name)
+        shop_url_key: Alias for ``integration_id``
+
     Returns:
         Configured SusoftClient instance
     """
+    key = integration_id or shop_url_key
+    if not key:
+        raise ValueError(
+            "create_susoft_client requires integration_id (or shop_url_key)"
+        )
     return SusoftClient(
         base_url=base_url,
-        shop_url_key=shop_url_key,
-        api_key_encrypted=api_key_encrypted
+        shop_url_key=key,
+        api_key_encrypted=api_key_encrypted,
     )

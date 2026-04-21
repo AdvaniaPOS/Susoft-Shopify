@@ -13,7 +13,8 @@ services:
     container_name: susoft-shopify-api
     restart: always
     ports:
-      - "8000:8000"
+      # Host port 5400 -> container 8000 (Cloudflare Tunnel "Shopify.poshub.no" -> http://localhost:5400)
+      - "5400:8000"
     environment:
       - ENVIRONMENT=production
       - DEBUG=false

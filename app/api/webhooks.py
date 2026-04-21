@@ -30,7 +30,33 @@ from app.db.repositories import (
     TenantRepository,
     WebhookEventRepository
 )
-from app.workers.tasks import process_shopify_order, process_susoft_stock_change
+from app.workers.tasks import (
+    process_shopify_order,
+    process_susoft_stock_change,
+    _process_shopify_order_async,
+    _process_susoft_order_delivered_async,
+)
+
+
+async def _run_shopify_order_inline(
+    tenant_id: str,
+    order_data: Dict[str, Any],
+    webhook_event_id: Optional[str],
+) -> None:
+    """Run order processing inline (no Celery/Redis) — used in development."""
+    try:
+        await _process_shopify_order_async(
+            task=None,
+            tenant_id=tenant_id,
+            order_data=order_data,
+            webhook_event_id=webhook_event_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Inline Shopify order processing failed",
+            tenant_id=tenant_id,
+            error=str(exc),
+        )
 
 
 logger = structlog.get_logger()
@@ -127,21 +153,32 @@ async def shopify_order_created(
         }
     )
     
-    # Queue for processing
-    process_shopify_order.apply_async(
-        kwargs={
-            "tenant_id": str(tenant.id),
-            "order_data": order_data,
-            "webhook_event_id": str(webhook_event.id)
-        },
-        queue="orders"
-    )
-    
+    # Dispatch for processing — inline in dev, Celery in prod
+    if settings.is_development:
+        background_tasks.add_task(
+            _run_shopify_order_inline,
+            tenant_id=str(tenant.id),
+            order_data=order_data,
+            webhook_event_id=str(webhook_event.id),
+        )
+        dispatch_mode = "inline"
+    else:
+        process_shopify_order.apply_async(
+            kwargs={
+                "tenant_id": str(tenant.id),
+                "order_data": order_data,
+                "webhook_event_id": str(webhook_event.id)
+            },
+            queue="orders"
+        )
+        dispatch_mode = "celery"
+
     logger.info(
         "Shopify order webhook queued",
         tenant_id=str(tenant.id),
         order_id=order_data.get("id"),
-        order_name=order_data.get("name")
+        order_name=order_data.get("name"),
+        dispatch=dispatch_mode,
     )
     
     return {"status": "queued", "webhook_event_id": str(webhook_event.id)}
@@ -361,6 +398,59 @@ async def susoft_order_created(
     )
     
     return {"status": "acknowledged"}
+
+
+@router.post("/susoft/{tenant_id}/order-delivered")
+async def susoft_order_delivered(
+    request: Request,
+    tenant_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Handle Susoft ON_DELIVERY webhook -> create Shopify fulfillment."""
+    tenant_repo = TenantRepository(session)
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Optional bearer-token check (mirrors stock-changed handler)
+    if authorization and tenant.susoft_webhook_secret_encrypted:
+        from app.core.security import decrypt_credential
+        token = authorization.replace("Bearer ", "").strip()
+        expected_token = decrypt_credential(tenant.susoft_webhook_secret_encrypted)
+        if token != expected_token:
+            logger.warning("Invalid Susoft webhook token", tenant_id=tenant_id)
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+    body = await request.body()
+    import json
+    order_data = json.loads(body)
+
+    webhook_repo = WebhookEventRepository(session)
+    webhook_event = await webhook_repo.create(
+        tenant_id=tenant_id,
+        source=WebhookSource.SUSOFT,
+        event_type="ON_DELIVERY",
+        external_id=order_data.get("uuid"),
+        payload=order_data,
+    )
+
+    # Inline in dev (no Celery). For prod we'd queue this on the orders queue.
+    background_tasks.add_task(
+        _process_susoft_order_delivered_async,
+        tenant_id=tenant_id,
+        susoft_order=order_data,
+        webhook_event_id=str(webhook_event.id),
+    )
+
+    logger.info(
+        "Susoft delivery webhook queued",
+        tenant_id=tenant_id,
+        susoft_uuid=order_data.get("uuid"),
+        susoft_order_no=order_data.get("orderNo"),
+    )
+    return {"status": "queued", "webhook_event_id": str(webhook_event.id)}
 
 
 # ===================

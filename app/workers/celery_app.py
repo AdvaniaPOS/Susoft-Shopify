@@ -86,6 +86,11 @@ celery_app.conf.update(
             "task": "app.workers.scheduled_tasks.check_tenant_heartbeats",
             "schedule": 60.0,  # 1 minute
         },
+        # Queue stock syncs based on each tenant's configured interval
+        "tenant-stock-sync-scheduler": {
+            "task": "app.workers.scheduled_tasks.schedule_tenant_stock_syncs",
+            "schedule": 60.0,  # 1 minute
+        },
         # Full stock sync daily at 3 AM
         "daily-stock-reconciliation": {
             "task": "app.workers.scheduled_tasks.daily_stock_reconciliation",

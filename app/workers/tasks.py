@@ -208,14 +208,17 @@ async def _process_shopify_order_async(
                 susoft_order = await _build_susoft_order(
                     tenant_id=tenant_id,
                     order_data=order_data,
-                    mapping_repo=mapping_repo
+                    mapping_repo=mapping_repo,
+                    susoft_shop_id=tenant.susoft_integration_id
                 )
                 
-                # Create order in Susoft with idempotency
-                # Use alternativeId = "SHOPIFY-{order_id}" as discussed
-                susoft_order["alternativeId"] = f"SHOPIFY-{order_id}"
-                
-                result = await susoft_client.create_order(susoft_order)
+                # Create order in Susoft with idempotency.
+                # SusoftClient.create_order sets alternativeId/uuid from
+                # shopify_order_id internally.
+                result = await susoft_client.create_order(
+                    order_data=susoft_order,
+                    shopify_order_id=order_id,
+                )
                 
                 # Update sync log as success
                 await sync_log_repo.update_status(
@@ -236,12 +239,26 @@ async def _process_shopify_order_async(
                     shopify_order=order_name,
                     susoft_order_id=result.get("uuid")
                 )
-                
+
+                # Mark + close Shopify order so nobody fulfills it manually
+                await _post_susoft_success_actions(
+                    tenant=tenant,
+                    shopify_order_id=order_id,
+                    shopify_order_name=order_name,
+                    susoft_result=result,
+                )
+
         except SusoftAPIError as e:
             await sync_log_repo.update_status(
                 sync_log_id=sync_log.id,
                 status=SyncStatus.FAILED,
                 error_message=str(e)
+            )
+            await _post_susoft_failure_actions(
+                tenant=tenant,
+                shopify_order_id=order_id,
+                shopify_order_name=order_name,
+                error_message=str(e),
             )
             raise
         except Exception as e:
@@ -250,15 +267,321 @@ async def _process_shopify_order_async(
                 status=SyncStatus.FAILED,
                 error_message=str(e)
             )
+            await _post_susoft_failure_actions(
+                tenant=tenant,
+                shopify_order_id=order_id,
+                shopify_order_name=order_name,
+                error_message=str(e),
+            )
             raise
+
+
+async def _post_susoft_success_actions(
+    tenant,
+    shopify_order_id: str,
+    shopify_order_name: str,
+    susoft_result: Dict[str, Any],
+) -> None:
+    """Tag, annotate and (optionally) close the Shopify order after a successful
+    Susoft create.
+
+    Best-effort: any failure here is logged but does NOT raise — the Susoft
+    order has already been created, so we must not retry the whole task and
+    risk a duplicate. Operators can re-run the post-actions manually via the
+    admin endpoint if needed.
+    """
+    try:
+        shopify_client = create_shopify_client(
+            shop_url=tenant.shopify_shop_url,
+            access_token_encrypted=tenant.shopify_access_token_encrypted,
+        )
+        async with shopify_client:
+            susoft_uuid = susoft_result.get("uuid") or susoft_result.get("id") or ""
+            susoft_order_no = susoft_result.get("orderNo") or susoft_result.get("alternativeId") or ""
+            tag = getattr(tenant, "shopify_synced_tag", None) or "susoft-synced"
+            tags_to_add = [tag]
+            # Shopify tags are limited to 40 characters; full UUIDs (36 chars)
+            # plus a "susoft-id-" prefix exceed that. Prefer the short numeric
+            # orderNo if present, otherwise fall back to the first 8 chars of
+            # the UUID for traceability.
+            if susoft_order_no:
+                short_ref = str(susoft_order_no)
+            elif susoft_uuid:
+                short_ref = str(susoft_uuid).split("-")[0]
+            else:
+                short_ref = ""
+            if short_ref:
+                tags_to_add.append(f"susoft-id-{short_ref}")
+
+            await shopify_client.add_order_tags(shopify_order_id, tags_to_add)
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            note_parts = [f"[Susoft] {ts} — order created in Susoft"]
+            if susoft_order_no:
+                note_parts.append(f"orderNo={susoft_order_no}")
+            if susoft_uuid:
+                note_parts.append(f"uuid={susoft_uuid}")
+            note_line = " ".join(note_parts) if len(note_parts) == 1 else (
+                note_parts[0] + " (" + ", ".join(note_parts[1:]) + ")"
+            )
+            await shopify_client.append_order_note(shopify_order_id, note_line)
+
+            should_close = getattr(tenant, "close_orders_after_susoft", True)
+            if should_close:
+                await shopify_client.close_order(shopify_order_id)
+                logger.info(
+                    "Shopify order closed after Susoft sync",
+                    shopify_order=shopify_order_name,
+                    susoft_uuid=susoft_uuid,
+                    susoft_order_no=susoft_order_no,
+                )
+    except Exception as exc:  # noqa: BLE001 - best-effort, never re-raise
+        logger.warning(
+            "post_susoft_success_actions failed (non-fatal)",
+            shopify_order=shopify_order_name,
+            error=str(exc),
+        )
+
+
+async def _post_susoft_failure_actions(
+    tenant,
+    shopify_order_id: str,
+    shopify_order_name: str,
+    error_message: str,
+) -> None:
+    """Tag and annotate the Shopify order after Susoft create failed.
+
+    Does NOT close the order — operator needs to investigate and either
+    re-trigger the sync or fulfill manually in Shopify. Best-effort: never
+    re-raises so the original Celery exception propagates cleanly.
+    """
+    try:
+        shopify_client = create_shopify_client(
+            shop_url=tenant.shopify_shop_url,
+            access_token_encrypted=tenant.shopify_access_token_encrypted,
+        )
+        async with shopify_client:
+            tag = getattr(tenant, "shopify_failed_tag", None) or "susoft-failed"
+            await shopify_client.add_order_tags(shopify_order_id, [tag])
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            note_line = f"[Susoft] {ts} — sync FAILED: {error_message[:300]}"
+            await shopify_client.append_order_note(shopify_order_id, note_line)
+    except Exception as exc:  # noqa: BLE001 - best-effort, never re-raise
+        logger.warning(
+            "post_susoft_failure_actions failed (non-fatal)",
+            shopify_order=shopify_order_name,
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Susoft ON_DELIVERY -> Shopify fulfillment
+# ---------------------------------------------------------------------------
+
+
+def _extract_shopify_order_id(susoft_order: Dict[str, Any]) -> Optional[str]:
+    """Pull the Shopify order id out of a Susoft order's ``alternativeId``.
+
+    We set ``alternativeId = "SHOPIFY-{order_id}"`` when creating the order in
+    Susoft, so reverse-mapping is just stripping the prefix.
+    """
+    alt = (susoft_order.get("alternativeId") or "").strip()
+    if not alt.upper().startswith("SHOPIFY-"):
+        return None
+    rest = alt.split("-", 1)[1]
+    # ``test_order_flow.py`` appends a timestamp suffix (SHOPIFY-{id}-{HHMMSS})
+    # in dev. Take only the leading digits.
+    head = rest.split("-", 1)[0]
+    return head or None
+
+
+async def _process_susoft_order_delivered_async(
+    tenant_id: str,
+    susoft_order: Dict[str, Any],
+    webhook_event_id: Optional[str],
+) -> None:
+    """Fulfill the matching Shopify order when Susoft fires ON_DELIVERY.
+
+    Best-effort: any failure here is logged. The Susoft side has already
+    shipped, so we never want to bubble exceptions up and trigger retries
+    that could double-fulfill in Shopify.
+    """
+    susoft_uuid = susoft_order.get("uuid") or ""
+    susoft_order_no = susoft_order.get("orderNo") or ""
+    tracking_number = susoft_order.get("trackingNumber") or ""
+
+    shopify_order_id = _extract_shopify_order_id(susoft_order)
+    if not shopify_order_id:
+        logger.info(
+            "ON_DELIVERY for non-Shopify order (no SHOPIFY- alternativeId); ignoring",
+            tenant_id=tenant_id,
+            susoft_uuid=susoft_uuid,
+            susoft_order_no=susoft_order_no,
+        )
+        return
+
+    async with get_session_context() as session:
+        tenant_repo = TenantRepository(session)
+        sync_log_repo = SyncLogRepository(session)
+        tenant = await tenant_repo.get_by_id(tenant_id)
+        if not tenant or not tenant.is_active:
+            logger.warning(
+                "ON_DELIVERY: tenant missing/inactive",
+                tenant_id=tenant_id,
+            )
+            return
+
+        # Idempotency: skip if we already fulfilled this Susoft order.
+        external_id = f"susoft_delivery_{susoft_uuid or susoft_order_no}"
+        existing = await sync_log_repo.get_by_external_id(
+            tenant_id=tenant_id, external_id=external_id
+        )
+        if existing and existing.status == SyncStatus.SUCCESS:
+            logger.info(
+                "ON_DELIVERY already processed; skipping",
+                tenant_id=tenant_id,
+                susoft_uuid=susoft_uuid,
+                shopify_order_id=shopify_order_id,
+            )
+            return
+
+        sync_log = await sync_log_repo.create(
+            tenant_id=tenant_id,
+            sync_type=SyncType.ORDER,
+            direction=SyncDirection.SUSOFT_TO_SHOPIFY,
+            external_id=external_id,
+            source_payload=susoft_order,
+            status=SyncStatus.PROCESSING,
+        )
+
+        shopify_client = create_shopify_client(
+            shop_url=tenant.shopify_shop_url,
+            access_token_encrypted=tenant.shopify_access_token_encrypted,
+        )
+        try:
+            async with shopify_client:
+                # 1. Tag + note (best-effort, even if fulfillment later fails)
+                tag = "susoft-shipped"
+                tags_to_add = [tag]
+                if susoft_order_no:
+                    tags_to_add.append(f"susoft-shipped-{susoft_order_no}")
+                try:
+                    await shopify_client.add_order_tags(
+                        shopify_order_id, tags_to_add
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "add_order_tags (delivery) failed",
+                        shopify_order_id=shopify_order_id,
+                        error=str(exc),
+                    )
+
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                note_parts = [f"[Susoft] {ts} — order shipped"]
+                if susoft_order_no:
+                    note_parts.append(f"orderNo={susoft_order_no}")
+                if tracking_number:
+                    note_parts.append(f"tracking={tracking_number}")
+                note_line = note_parts[0] + (
+                    " (" + ", ".join(note_parts[1:]) + ")"
+                    if len(note_parts) > 1
+                    else ""
+                )
+                try:
+                    await shopify_client.append_order_note(
+                        shopify_order_id, note_line
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "append_order_note (delivery) failed",
+                        shopify_order_id=shopify_order_id,
+                        error=str(exc),
+                    )
+
+                # 2. Create fulfillment for every fulfillment_order on this order.
+                fulfillment_orders = await shopify_client.list_fulfillment_orders(
+                    shopify_order_id
+                )
+                created_fulfillments = []
+                for fo in fulfillment_orders:
+                    if (fo.get("status") or "").lower() == "closed":
+                        continue
+                    fo_id = fo.get("id")
+                    if not fo_id:
+                        continue
+                    fulfillment = await shopify_client.create_fulfillment(
+                        fulfillment_order_id=str(fo_id),
+                        tracking_number=tracking_number or None,
+                        notify_customer=True,
+                    )
+                    created_fulfillments.append(fulfillment.get("id"))
+
+                logger.info(
+                    "Susoft ON_DELIVERY -> Shopify fulfillment created",
+                    tenant_id=tenant_id,
+                    shopify_order_id=shopify_order_id,
+                    susoft_uuid=susoft_uuid,
+                    susoft_order_no=susoft_order_no,
+                    tracking_number=tracking_number or None,
+                    fulfillments=created_fulfillments,
+                )
+
+                await sync_log_repo.update_status(
+                    sync_log_id=sync_log.id,
+                    status=SyncStatus.SUCCESS,
+                    response_payload={
+                        "shopify_order_id": shopify_order_id,
+                        "fulfillments": created_fulfillments,
+                        "tracking_number": tracking_number or None,
+                    },
+                )
+                await tenant_repo.update_heartbeat(
+                    tenant_id=tenant_id, direction="fulfillment_sync"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "ON_DELIVERY processing failed",
+                tenant_id=tenant_id,
+                shopify_order_id=shopify_order_id,
+                error=str(exc),
+            )
+            await sync_log_repo.update_status(
+                sync_log_id=sync_log.id,
+                status=SyncStatus.FAILED,
+                error_message=str(exc),
+            )
 
 
 async def _build_susoft_order(
     tenant_id: str,
     order_data: Dict[str, Any],
-    mapping_repo: ProductMappingRepository
+    mapping_repo: ProductMappingRepository,
+    susoft_shop_id: str
 ) -> Dict[str, Any]:
     """Build a Susoft order from Shopify order data."""
+
+    def _parse_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _map_gateway_to_payment_type(gateways: Any) -> str:
+        names = [str(g).lower() for g in (gateways or [])]
+        joined = " ".join(names)
+
+        if "vipps" in joined:
+            return "VIPPS"
+        if "klarna" in joined:
+            return "KLARNA"
+        if "stripe" in joined:
+            return "STRIPE"
+        if "sumup" in joined:
+            return "SUMUP"
+        if "nets" in joined:
+            return "NETS_EASY"
+        return "TERMINAL"
     
     # Extract customer info
     customer = order_data.get("customer", {})
@@ -314,6 +637,42 @@ async def _build_susoft_order(
                 "unitPrice": float(item.get("price", 0)),
                 "description": item.get("name")
             })
+
+    # Susoft API currently ignores shippingAmount/shippingName on create,
+    # so we optionally model shipping as an explicit order line instead.
+    shipping_lines = order_data.get("shipping_lines", []) or []
+    shipping_amount = sum(_parse_float(line.get("price", 0)) for line in shipping_lines)
+    if shipping_amount <= 0:
+        shipping_amount = _parse_float(
+            (((order_data.get("total_shipping_price_set") or {}).get("shop_money") or {}).get("amount")),
+            0.0,
+        )
+    shipping_name = ", ".join(
+        str(line.get("title") or "Frakt")
+        for line in shipping_lines
+        if line.get("title")
+    )
+
+    shipping_sku = settings.shopify_shipping_sku
+    if shipping_amount > 0 and shipping_sku:
+        shipping_mapping = await mapping_repo.get_by_sku(tenant_id, shipping_sku)
+        shipping_line = {
+            "sku": shipping_sku,
+            "quantity": 1,
+            "unitPrice": shipping_amount,
+            "description": shipping_name or "Frakt",
+        }
+
+        if shipping_mapping:
+            shipping_line["productUuid"] = shipping_mapping.susoft_product_id
+        else:
+            logger.warning(
+                "Shipping SKU has no mapping; sending shipping line with SKU only",
+                tenant_id=tenant_id,
+                shipping_sku=shipping_sku,
+            )
+
+        lines.append(shipping_line)
     
     # Build the order
     susoft_order = {
@@ -322,9 +681,29 @@ async def _build_susoft_order(
         "orderNumber": order_data.get("name", ""),
         "note": order_data.get("note", ""),
         "currency": order_data.get("currency", "NOK"),
-        "totalPrice": float(order_data.get("total_price", 0)),
-        "source": "shopify"
+        "totalPrice": _parse_float(order_data.get("total_price", 0)),
     }
+
+    financial_status = str(order_data.get("financial_status", "")).lower()
+    if financial_status in {"paid", "partially_paid"}:
+        total_amount = _parse_float(order_data.get("total_price", 0))
+        payment_type = _map_gateway_to_payment_type(order_data.get("payment_gateway_names", []))
+
+        susoft_order["payments"] = [{
+            "paymentType": payment_type,
+            "amount": total_amount,
+            "currencyAmount": total_amount,
+            "currency": order_data.get("currency", "NOK"),
+            "rate": 1.0,
+            "orderNo": 0,
+            "shopId": susoft_shop_id,
+            "issuedShopId": susoft_shop_id,
+            "transactionId": f"shopify-{order_data.get('id')}",
+            "note": "Betalt i Shopify"
+        }]
+        susoft_order["isForInvoicing"] = False
+    else:
+        susoft_order["isForInvoicing"] = True
     
     return susoft_order
 
@@ -572,19 +951,26 @@ async def _sync_stock_to_shopify_async(
         )
         
         async with susoft_client, shopify_client:
-            # Fetch all stock from Susoft
-            susoft_stock = await susoft_client.get_all_stock()
-            
-            # Build lookup by product UUID
-            stock_lookup = {
-                item.get("productUuid"): item.get("quantity", 0)
-                for item in susoft_stock
-            }
+            # Fetch all products (including embedded stock) from Susoft
+            susoft_products = await susoft_client.get_all_products()
+
+            # Build lookup: susoft product id -> stock quantity
+            stock_lookup: dict = {}
+            for item in susoft_products:
+                pid = item.get("id") or item.get("productId")
+                if pid is None:
+                    continue
+                stock_obj = item.get("stock") or {}
+                if isinstance(stock_obj, dict):
+                    qty = stock_obj.get("stock", 0) or 0
+                else:
+                    qty = stock_obj or 0
+                stock_lookup[str(pid)] = qty
             
             # Prepare bulk updates
             updates = []
             for mapping in mappings:
-                susoft_qty = stock_lookup.get(mapping.susoft_product_id, 0)
+                susoft_qty = stock_lookup.get(str(mapping.susoft_product_id), 0)
                 safety_stock = mapping.safety_stock or 0
                 available = max(0, susoft_qty - safety_stock)
                 

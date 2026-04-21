@@ -73,9 +73,13 @@ celerybeat.pid
 .DS_Store
 Thumbs.db
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/.gitkeep
+# Alembic – keep migration files in repo
+#alembic/versions/*.py
+#!alembic/versions/.gitkeep
+
+# Local-only diagnostic / backup files
+*.bak
+_shopify_diag.py
 
 # Secrets (extra safety)
 *.pem

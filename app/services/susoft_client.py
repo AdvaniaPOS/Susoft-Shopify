@@ -644,6 +644,61 @@ class SusoftClient:
                     "duplicate": True,
                 }
 
+            # 500 may indicate a stale alternativeId lock from a previous
+            # crashed attempt. First check if the order actually exists; if
+            # so, treat as success. Otherwise retry once with a -R<timestamp>
+            # suffix on alternativeId/uuid (mirrors Susoft's own internal
+            # retry pattern visible in created orders).
+            if "500" in err_str:
+                try:
+                    existing = await self.get_order_by_alternative_id(
+                        order_data["alternativeId"]
+                    )
+                    if existing:
+                        logger.info(
+                            "Susoft 500 but order exists; treating as success",
+                            shopify_order_id=shopify_order_id,
+                            alternative_id=order_data["alternativeId"],
+                        )
+                        return existing
+                except Exception:
+                    pass
+
+                import time as _time
+                suffix = f"-R{int(_time.time())}"
+                new_alt = f"{order_data['alternativeId']}{suffix}"
+                logger.warning(
+                    "Susoft 500 on create; retrying with suffixed alternativeId",
+                    shopify_order_id=shopify_order_id,
+                    original_alt=order_data["alternativeId"],
+                    new_alt=new_alt,
+                )
+                order_data["alternativeId"] = new_alt
+                if "uuid" in order_data:
+                    order_data["uuid"] = new_alt
+                try:
+                    return await self._request(
+                        "POST",
+                        endpoint,
+                        params=params,
+                        json_data=order_data,
+                    )
+                except SusoftAPIError as retry_exc:
+                    retry_err = str(retry_exc)
+                    if "409" in retry_err or "already exists" in retry_err.lower():
+                        try:
+                            existing = await self.get_order_by_alternative_id(new_alt)
+                            if existing:
+                                return existing
+                        except Exception:
+                            pass
+                        return {
+                            "alternativeId": new_alt,
+                            "status": "exists",
+                            "duplicate": True,
+                        }
+                    raise
+
             # /order/pos may return 500/400 for fields it doesn't like, or
             # 404 from an internal post-step even though the order WAS created.
             # Check if the order exists before falling back to avoid duplicate

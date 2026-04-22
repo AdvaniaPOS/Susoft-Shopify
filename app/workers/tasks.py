@@ -613,27 +613,46 @@ async def _build_susoft_order(
 
     # Build customer for Susoft (per Susoft Customer/Address schema).
     # `lastName` is required; fall back to a sensible default for anonymous orders.
-    first_name = (customer.get("first_name") or shipping.get("first_name") or billing.get("first_name") or "").strip()
-    last_name = (customer.get("last_name") or shipping.get("last_name") or billing.get("last_name") or "").strip()
-    if not last_name:
-        last_name = first_name or "Shopify Customer"
-        first_name = "" if last_name == first_name else first_name
-
+    # Customer (the buyer/account holder) — used for the customer record.
+    cust_first = (customer.get("first_name") or "").strip()
+    cust_last = (customer.get("last_name") or "").strip()
+    # Address recipient — may differ from buyer (e.g. gift, ship-to-other).
+    # Prefer shipping address name; fall back to billing, then customer.
     addr_src = shipping or billing
+    addr_first = (
+        addr_src.get("first_name")
+        or cust_first
+        or billing.get("first_name")
+        or ""
+    ).strip()
+    addr_last = (
+        addr_src.get("last_name")
+        or cust_last
+        or billing.get("last_name")
+        or ""
+    ).strip()
+    if not addr_last:
+        addr_last = addr_first or "Shopify Customer"
+        addr_first = "" if addr_last == addr_first else addr_first
+    # Customer record name (separate from shipping name).
+    if not cust_last:
+        cust_last = cust_first or addr_last or "Shopify Customer"
+        cust_first = "" if cust_last == cust_first else cust_first
+
     susoft_address = {
         "addressLine1": addr_src.get("address1", "") or "",
         "addressLine2": addr_src.get("address2", "") or "",
         "city": addr_src.get("city", "") or "",
         "zipCode": addr_src.get("zip", "") or "",
         "countryCode": addr_src.get("country_code", "NO") or "NO",
-        "name": (f"{first_name} {last_name}".strip() or last_name),
+        "name": (f"{addr_first} {addr_last}".strip() or addr_last),
         "email": customer.get("email") or order_data.get("email"),
         "mobilePhone": customer.get("phone") or addr_src.get("phone"),
     }
     susoft_customer = {
-        "firstName": first_name,
-        "lastName": last_name,
-        "displayName": f"{first_name} {last_name}".strip() or last_name,
+        "firstName": cust_first,
+        "lastName": cust_last,
+        "displayName": f"{cust_first} {cust_last}".strip() or cust_last,
         "address": susoft_address,
     }
 

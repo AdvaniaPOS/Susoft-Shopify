@@ -1021,29 +1021,62 @@ async def _sync_stock_to_shopify_async(
         )
         
         async with susoft_client, shopify_client:
-            # Fetch all products (including embedded stock) from Susoft
-            susoft_products = await susoft_client.get_all_products()
+            # Try Redis cache first - the catalogue fetch hits 50+ Susoft pages
+            # and triggers heavy rate-limiting. Cache the stock_lookup per
+            # tenant for STOCK_LOOKUP_CACHE_TTL seconds so back-to-back stock
+            # syncs reuse the same data. Webhook-driven stock changes still
+            # update Shopify in real time via process_susoft_stock_change.
+            import json as _json
+            STOCK_LOOKUP_CACHE_TTL = 300  # 5 minutes
+            cache_key = f"susoft_stock_lookup:{tenant_id}"
+            cached = redis_client.get(cache_key)
+            stock_lookup: dict
+            if cached:
+                stock_lookup = _json.loads(cached)
+                logger.info(
+                    "Reusing cached Susoft stock lookup",
+                    tenant_id=tenant_id,
+                    stock_lookup_size=len(stock_lookup),
+                    mappings=len(mappings),
+                )
+            else:
+                # Fetch all products (including embedded stock) from Susoft
+                susoft_products = await susoft_client.get_all_products()
 
-            # Build lookup: susoft product id -> stock quantity
-            stock_lookup: dict = {}
-            for item in susoft_products:
-                pid = item.get("id") or item.get("productId")
-                if pid is None:
-                    continue
-                stock_obj = item.get("stock") or {}
-                if isinstance(stock_obj, dict):
-                    qty = stock_obj.get("stock", 0) or 0
-                else:
-                    qty = stock_obj or 0
-                stock_lookup[str(pid)] = int(qty) if qty is not None else 0
+                # Build lookup: susoft product id -> stock quantity
+                stock_lookup = {}
+                for item in susoft_products:
+                    pid = item.get("id") or item.get("productId")
+                    if pid is None:
+                        continue
+                    stock_obj = item.get("stock") or {}
+                    if isinstance(stock_obj, dict):
+                        qty = stock_obj.get("stock", 0) or 0
+                    else:
+                        qty = stock_obj or 0
+                    stock_lookup[str(pid)] = int(qty) if qty is not None else 0
 
-            logger.info(
-                "Fetched Susoft products for stock sync",
-                tenant_id=tenant_id,
-                susoft_products=len(susoft_products),
-                stock_lookup_size=len(stock_lookup),
-                mappings=len(mappings),
-            )
+                try:
+                    redis_client.setex(
+                        cache_key,
+                        STOCK_LOOKUP_CACHE_TTL,
+                        _json.dumps(stock_lookup),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to cache Susoft stock lookup",
+                        tenant_id=tenant_id,
+                        error=str(exc),
+                    )
+
+                logger.info(
+                    "Fetched Susoft products for stock sync",
+                    tenant_id=tenant_id,
+                    susoft_products=len(susoft_products),
+                    stock_lookup_size=len(stock_lookup),
+                    mappings=len(mappings),
+                    cached_for_seconds=STOCK_LOOKUP_CACHE_TTL,
+                )
 
             # Prepare bulk updates
             updates = []

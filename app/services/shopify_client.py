@@ -675,8 +675,15 @@ class ShopifyClient:
         # Check for user errors
         if result.get("inventorySetOnHandQuantities", {}).get("userErrors"):
             errors = result["inventorySetOnHandQuantities"]["userErrors"]
+            # Log the actual error details so we can see what Shopify rejected
+            logger.error(
+                "Shopify bulk inventory update returned userErrors",
+                user_errors=errors,
+                update_count=len(updates),
+                sample_updates=updates[:3],
+            )
             raise ShopifyAPIError(
-                "Bulk inventory update errors",
+                f"Bulk inventory update errors: {errors}",
                 errors=errors
             )
         

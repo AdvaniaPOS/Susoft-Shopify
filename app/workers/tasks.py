@@ -1119,8 +1119,26 @@ async def _sync_stock_to_shopify_async(
             )
 
             if updates:
-                # Use bulk update for efficiency
-                await shopify_client.bulk_set_inventory_levels(updates)
+                # Use bulk update for efficiency. Catch deterministic Shopify
+                # userErrors here so we don't retry+DLQ-pile-up - those errors
+                # repeat forever until the underlying mapping issue is fixed.
+                try:
+                    await shopify_client.bulk_set_inventory_levels(updates)
+                except ShopifyAPIError as exc:
+                    if getattr(exc, "errors", None):
+                        logger.error(
+                            "Bulk stock sync rejected by Shopify userErrors; "
+                            "skipping until mappings are fixed",
+                            tenant_id=tenant_id,
+                            user_errors=exc.errors,
+                            update_count=len(updates),
+                        )
+                        # Mark sync attempted so scheduler still throttles,
+                        # then return without raising (no retry, no DLQ).
+                        tenant.last_stock_sync_at = datetime.now(timezone.utc)
+                        await session.flush()
+                        return
+                    raise
 
                 logger.info(
                     "Bulk stock sync completed",

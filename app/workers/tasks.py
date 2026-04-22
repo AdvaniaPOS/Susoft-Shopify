@@ -1303,9 +1303,13 @@ def _extract_susoft_product_fields(p: Dict[str, Any]) -> Dict[str, Any]:
     """
     name = p.get("name") or p.get("productName") or p.get("title")
 
-    # Price: prefer price including VAT (matches Shopify storefront price in Norway)
+    # Price: prefer retail price including VAT (matches Shopify storefront
+    # price in Norway). Susoft's /product/list/modified uses `retailPrice`
+    # (gross, incl VAT). Fall back to other common variants for safety.
     price = (
-        p.get("priceWithVAT")
+        p.get("retailPrice")
+        if p.get("retailPrice") is not None
+        else p.get("priceWithVAT")
         or p.get("priceVAT")
         or p.get("priceInclVat")
         or p.get("priceInclVAT")
@@ -1313,12 +1317,12 @@ def _extract_susoft_product_fields(p: Dict[str, Any]) -> Dict[str, Any]:
         or p.get("price")
     )
 
-    # VAT rate (e.g. 25 for 25%)
+    # VAT rate (e.g. 25 for 25%). Susoft uses `vatPercent`.
     vat_rate = (
-        p.get("vatRate")
-        if p.get("vatRate") is not None
+        p.get("vatPercent")
+        if p.get("vatPercent") is not None
+        else p.get("vatRate") if p.get("vatRate") is not None
         else p.get("vat") if p.get("vat") is not None
-        else p.get("vatPercent") if p.get("vatPercent") is not None
         else (p.get("vatCode") or {}).get("rate") if isinstance(p.get("vatCode"), dict) else None
     )
 
@@ -1430,9 +1434,6 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
             unmatched = 0
             skipped = 0
             errors = 0
-            # Diagnostic: log first few susoft payloads so we can see actual field
-            # names (Susoft schemas vary between deployments).
-            sample_logged = 0
 
             # Cache product fetches across mappings sharing the same Shopify product
             product_cache: Dict[str, Dict[str, Any]] = {}
@@ -1466,52 +1467,6 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                         and susoft_fields["category"] != shop_product.get("product_type")
                     ):
                         product_updates["product_type"] = susoft_fields["category"]
-
-                    # Diagnostic: log first 3 comparisons so we can see what
-                    # Susoft actually sends vs what Shopify currently has.
-                    if sample_logged < 3:
-                        # Find raw susoft payload for this product to surface
-                        # any title-like fields we might be missing.
-                        raw = next(
-                            (p for p in susoft_products
-                             if str(p.get("id") or p.get("productId")) == key),
-                            None,
-                        )
-                        title_like = {}
-                        if isinstance(raw, dict):
-                            for k in ("name", "productName", "title", "displayName",
-                                      "description", "shortDescription", "longName"):
-                                if k in raw:
-                                    title_like[k] = raw[k]
-                        # Also dump ALL top-level keys + price-like / category-like
-                        # values so we can find Susoft field names we don't know.
-                        all_keys = sorted(raw.keys()) if isinstance(raw, dict) else []
-                        price_like = {}
-                        category_like = {}
-                        if isinstance(raw, dict):
-                            for k, v in raw.items():
-                                lk = k.lower()
-                                if "price" in lk or "cost" in lk or "amount" in lk:
-                                    price_like[k] = v
-                                if "categ" in lk or "group" in lk or "type" in lk:
-                                    category_like[k] = v
-                        logger.info(
-                            "Product sync diagnostic sample",
-                            tenant_id=tenant_id,
-                            susoft_id=key,
-                            shopify_product_id=shopify_product_id,
-                            shopify_title=shop_product.get("title"),
-                            susoft_extracted_name=susoft_fields["name"],
-                            susoft_title_like_fields=title_like,
-                            susoft_extracted_price=susoft_fields["price"],
-                            susoft_price_like_fields=price_like,
-                            susoft_extracted_vat=susoft_fields["vat_rate"],
-                            susoft_extracted_category=susoft_fields["category"],
-                            susoft_category_like_fields=category_like,
-                            susoft_all_keys=all_keys,
-                            will_update_product=bool(product_updates),
-                        )
-                        sample_logged += 1
 
                     if product_updates:
                         await shopify_client.update_product(shopify_product_id, product_updates)

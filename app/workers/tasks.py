@@ -956,13 +956,31 @@ def sync_stock_to_shopify(
         product_mappings: Optional list of specific mappings to sync.
                          If None, syncs all active mappings.
     """
-    asyncio.get_event_loop().run_until_complete(
-        _sync_stock_to_shopify_async(
-            task=self,
+    # Distributed lock so concurrent stock syncs (or stock + product sync)
+    # don't both pull the full Susoft catalogue in parallel and trigger
+    # rate limits. Shared key with product sync since both call the same
+    # /product/list/modified endpoint.
+    lock_key = f"susoft_catalogue_lock:{tenant_id}"
+    lock = redis_client.lock(lock_key, timeout=600)
+    if not lock.acquire(blocking=False):
+        logger.info(
+            "Susoft catalogue fetch already running for tenant; skipping stock sync",
             tenant_id=tenant_id,
-            product_mappings=product_mappings
         )
-    )
+        return
+    try:
+        asyncio.get_event_loop().run_until_complete(
+            _sync_stock_to_shopify_async(
+                task=self,
+                tenant_id=tenant_id,
+                product_mappings=product_mappings
+            )
+        )
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 
 async def _sync_stock_to_shopify_async(
@@ -1154,11 +1172,10 @@ def sync_products_to_shopify(self, tenant_id: str):
     run on a schedule (e.g. every 30 min) and is safe to run concurrently
     with stock sync.
     """
-    # Distributed lock so only one product sync runs per tenant at a time.
-    # Without this, multiple workers fan out and each pulls the full
-    # Susoft product catalogue in parallel, hammering /product/list/modified
-    # and triggering 429s on every other request.
-    lock_key = f"product_sync_lock:{tenant_id}"
+    # Distributed lock so only one catalogue-fetching task runs per tenant
+    # at a time. Shared key with stock sync since both call
+    # /product/list/modified.
+    lock_key = f"susoft_catalogue_lock:{tenant_id}"
     lock = redis_client.lock(lock_key, timeout=600)  # 10 min safety timeout
     if not lock.acquire(blocking=False):
         logger.info(

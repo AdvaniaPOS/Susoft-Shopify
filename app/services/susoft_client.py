@@ -670,12 +670,35 @@ class SusoftClient:
                     error=err_str,
                 )
                 order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
-                return await self._request(
-                    "POST",
-                    "/order",
-                    params={"recalculate": str(recalculate).lower()},
-                    json_data=order_data,
-                )
+                try:
+                    return await self._request(
+                        "POST",
+                        "/order",
+                        params={"recalculate": str(recalculate).lower()},
+                        json_data=order_data,
+                    )
+                except SusoftAPIError as fallback_exc:
+                    fb_err = str(fallback_exc)
+                    if "409" in fb_err or "already exists" in fb_err.lower():
+                        logger.info(
+                            "Fallback /order returned 409; treating as success",
+                            shopify_order_id=shopify_order_id,
+                            alternative_id=order_data["alternativeId"],
+                        )
+                        try:
+                            existing = await self.get_order_by_alternative_id(
+                                order_data["alternativeId"]
+                            )
+                            if existing:
+                                return existing
+                        except Exception:
+                            pass
+                        return {
+                            "alternativeId": order_data["alternativeId"],
+                            "status": "exists",
+                            "duplicate": True,
+                        }
+                    raise
             raise
     
     async def get_order_by_alternative_id(self, alt_id: str) -> Optional[Dict[str, Any]]:

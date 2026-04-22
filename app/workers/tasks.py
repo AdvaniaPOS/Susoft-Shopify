@@ -302,7 +302,13 @@ async def _post_susoft_success_actions(
         )
         async with shopify_client:
             susoft_uuid = susoft_result.get("uuid") or susoft_result.get("id") or ""
-            susoft_order_no = susoft_result.get("orderNo") or susoft_result.get("alternativeId") or ""
+            # Only treat orderNo as real if Susoft actually returned one.
+            # Falling back to alternativeId would mislead — alternativeId is
+            # OUR id (e.g. SHOPIFY-12054937108844), not a Susoft orderNo.
+            real_order_no = susoft_result.get("orderNo")
+            susoft_order_no = real_order_no or ""
+            alt_id = susoft_result.get("alternativeId") or ""
+            is_stub = bool(susoft_result.get("duplicate")) and not real_order_no
             tag = getattr(tenant, "shopify_synced_tag", None) or "susoft-synced"
             tags_to_add = [tag]
             # Shopify tags are limited to 40 characters; full UUIDs (36 chars)
@@ -317,18 +323,30 @@ async def _post_susoft_success_actions(
                 short_ref = ""
             if short_ref:
                 tags_to_add.append(f"susoft-id-{short_ref}")
+            if is_stub:
+                # Flag so we can audit which orders need manual verification.
+                tags_to_add.append("susoft-needs-verify")
 
             await shopify_client.add_order_tags(shopify_order_id, tags_to_add)
 
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            note_parts = [f"[Susoft] {ts} — order created in Susoft"]
-            if susoft_order_no:
-                note_parts.append(f"orderNo={susoft_order_no}")
-            if susoft_uuid:
-                note_parts.append(f"uuid={susoft_uuid}")
-            note_line = " ".join(note_parts) if len(note_parts) == 1 else (
-                note_parts[0] + " (" + ", ".join(note_parts[1:]) + ")"
-            )
+            if is_stub:
+                # We don't actually know if the order is in Susoft. Be honest
+                # in the note so staff can verify manually.
+                note_line = (
+                    f"[Susoft] {ts} — sync uncertain: Susoft returned "
+                    f"duplicate without order data (alternativeId={alt_id}). "
+                    f"Please verify in Susoft."
+                )
+            else:
+                note_parts = [f"[Susoft] {ts} — order created in Susoft"]
+                if susoft_order_no:
+                    note_parts.append(f"orderNo={susoft_order_no}")
+                if susoft_uuid:
+                    note_parts.append(f"uuid={susoft_uuid}")
+                note_line = note_parts[0] if len(note_parts) == 1 else (
+                    note_parts[0] + " (" + ", ".join(note_parts[1:]) + ")"
+                )
             await shopify_client.append_order_note(shopify_order_id, note_line)
 
             should_close = getattr(tenant, "close_orders_after_susoft", True)

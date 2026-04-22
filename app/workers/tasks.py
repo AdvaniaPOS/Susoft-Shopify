@@ -1099,6 +1099,19 @@ async def _sync_stock_to_shopify_async(
                 if not mapping.shopify_inventory_item_id:
                     skipped_no_inventory_item += 1
                     continue
+                # Shopify inventory_item_id must be a numeric string. Skip
+                # virtual/placeholder mappings like "shipping" (FRAKT) which
+                # are not real Shopify inventory items - sending them causes
+                # Shopify to reject the entire bulk update with userErrors.
+                if not str(mapping.shopify_inventory_item_id).isdigit():
+                    skipped_no_inventory_item += 1
+                    logger.debug(
+                        "Skipping non-numeric inventory_item_id (virtual product)",
+                        tenant_id=tenant_id,
+                        susoft_product_id=mapping.susoft_product_id,
+                        shopify_inventory_item_id=mapping.shopify_inventory_item_id,
+                    )
+                    continue
                 if not shopify_location_id:
                     skipped_no_location += 1
                     continue

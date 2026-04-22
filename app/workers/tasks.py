@@ -1483,6 +1483,18 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                                       "description", "shortDescription", "longName"):
                                 if k in raw:
                                     title_like[k] = raw[k]
+                        # Also dump ALL top-level keys + price-like / category-like
+                        # values so we can find Susoft field names we don't know.
+                        all_keys = sorted(raw.keys()) if isinstance(raw, dict) else []
+                        price_like = {}
+                        category_like = {}
+                        if isinstance(raw, dict):
+                            for k, v in raw.items():
+                                lk = k.lower()
+                                if "price" in lk or "cost" in lk or "amount" in lk:
+                                    price_like[k] = v
+                                if "categ" in lk or "group" in lk or "type" in lk:
+                                    category_like[k] = v
                         logger.info(
                             "Product sync diagnostic sample",
                             tenant_id=tenant_id,
@@ -1492,8 +1504,11 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                             susoft_extracted_name=susoft_fields["name"],
                             susoft_title_like_fields=title_like,
                             susoft_extracted_price=susoft_fields["price"],
+                            susoft_price_like_fields=price_like,
                             susoft_extracted_vat=susoft_fields["vat_rate"],
                             susoft_extracted_category=susoft_fields["category"],
+                            susoft_category_like_fields=category_like,
+                            susoft_all_keys=all_keys,
                             will_update_product=bool(product_updates),
                         )
                         sample_logged += 1

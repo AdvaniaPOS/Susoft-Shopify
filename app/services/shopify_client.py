@@ -688,6 +688,84 @@ class ShopifyClient:
             )
         
         return updates
+
+    async def get_committed_quantities(
+        self,
+        inventory_item_ids: List[str],
+        location_id: str,
+    ) -> Dict[str, int]:
+        """
+        Fetch the 'committed' quantity per inventory item at a location.
+
+        Committed = items reserved by unfulfilled orders. We need this to
+        avoid double-counting when syncing on_hand from Susoft: Susoft
+        decrements stock immediately on order, while Shopify only commits
+        (not decrements) until fulfillment. So Shopify on_hand must be
+        set to (susoft_qty + shopify_committed) to keep available correct.
+
+        Returns: dict {inventory_item_id_str: committed_int}
+        """
+        if not inventory_item_ids:
+            return {}
+
+        result: Dict[str, int] = {}
+        loc_gid = f"gid://shopify/Location/{location_id}"
+
+        # Batch in chunks of 50 to stay within GraphQL query cost limits
+        for i in range(0, len(inventory_item_ids), 50):
+            chunk = inventory_item_ids[i:i + 50]
+            ids_gids = [f"gid://shopify/InventoryItem/{iid}" for iid in chunk]
+
+            query = """
+            query getCommitted($ids: [ID!]!, $locationId: ID!) {
+              nodes(ids: $ids) {
+                ... on InventoryItem {
+                  id
+                  inventoryLevel(locationId: $locationId) {
+                    quantities(names: ["committed"]) {
+                      name
+                      quantity
+                    }
+                  }
+                }
+              }
+            }
+            """
+
+            try:
+                data = await self._graphql_request(
+                    query, {"ids": ids_gids, "locationId": loc_gid}
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch committed quantities; assuming 0",
+                    error=str(exc),
+                    chunk_size=len(chunk),
+                )
+                for iid in chunk:
+                    result[str(iid)] = 0
+                continue
+
+            for node in (data.get("nodes") or []):
+                if not node:
+                    continue
+                gid = node.get("id", "")
+                # gid format: gid://shopify/InventoryItem/12345
+                iid = gid.rsplit("/", 1)[-1] if gid else ""
+                committed = 0
+                level = node.get("inventoryLevel") or {}
+                for q in (level.get("quantities") or []):
+                    if q.get("name") == "committed":
+                        committed = int(q.get("quantity") or 0)
+                        break
+                if iid:
+                    result[iid] = committed
+
+            # Fill in zeros for any items that didn't return a node
+            for iid in chunk:
+                result.setdefault(str(iid), 0)
+
+        return result
     
     # ===================
     # Order Operations

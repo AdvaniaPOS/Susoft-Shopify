@@ -864,7 +864,20 @@ async def _process_susoft_stock_change_async(
         # Calculate available quantity (subtract safety stock)
         safety_stock = mapping.safety_stock or 0
         available_quantity = max(0, int(new_quantity) - safety_stock)
-        
+
+        # Skip mappings whose Shopify inventory_item_id is not a real numeric
+        # ID (e.g. "shipping" placeholder for FRAKT). Shopify will reject
+        # these and they have no real on_hand to update.
+        iid = (mapping.shopify_inventory_item_id or "").strip()
+        if not iid.isdigit():
+            logger.info(
+                "Skipping stock update for non-numeric inventory_item_id",
+                tenant_id=tenant_id,
+                sku=mapping.sku,
+                inventory_item_id=iid,
+            )
+            return
+
         previous_quantity = mapping.current_shopify_stock
         
         # Create sync log
@@ -896,12 +909,32 @@ async def _process_susoft_stock_change_async(
                 
                 if not shopify_location_id:
                     raise ValueError("No Shopify location configured")
-                
+
+                # Add Shopify 'committed' (unfulfilled-order reservations) so
+                # we don't double-decrement vs. Susoft (which already removed
+                # the ordered units from on_hand).
+                committed = 0
+                try:
+                    committed_lookup = await shopify_client.get_committed_quantities(
+                        [mapping.shopify_inventory_item_id], shopify_location_id
+                    )
+                    committed = int(
+                        committed_lookup.get(str(mapping.shopify_inventory_item_id), 0)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to fetch committed quantity; using 0",
+                        tenant_id=tenant_id,
+                        sku=mapping.sku,
+                        error=str(exc),
+                    )
+                target_on_hand = available_quantity + committed
+
                 # Update inventory in Shopify
                 result = await shopify_client.set_inventory_level(
                     inventory_item_id=mapping.shopify_inventory_item_id,
                     location_id=shopify_location_id,
-                    available=available_quantity
+                    available=target_on_hand,
                 )
                 
                 # Update mapping with new stock level
@@ -930,7 +963,9 @@ async def _process_susoft_stock_change_async(
                     tenant_id=tenant_id,
                     sku=mapping.sku,
                     previous=previous_quantity,
-                    new=available_quantity
+                    new=available_quantity,
+                    committed=committed,
+                    on_hand_set=target_on_hand,
                 )
                 
         except ShopifyAPIError as e:
@@ -1130,6 +1165,49 @@ async def _sync_stock_to_shopify_async(
                     "location_id": shopify_location_id,
                     "available": available,
                 })
+
+            # Add Shopify 'committed' (unfulfilled-order reservations) on top
+            # of Susoft on_hand. Susoft decrements stock immediately on order,
+            # while Shopify only commits until fulfillment. Without this,
+            # Shopify available would be double-decremented.
+            # Group by location to batch GraphQL queries.
+            if updates:
+                by_location: Dict[str, List[str]] = {}
+                for u in updates:
+                    by_location.setdefault(str(u["location_id"]), []).append(
+                        str(u["inventory_item_id"])
+                    )
+                committed_lookup: Dict[str, int] = {}
+                for loc_id, iids in by_location.items():
+                    try:
+                        loc_committed = await shopify_client.get_committed_quantities(
+                            iids, loc_id
+                        )
+                        for iid, qty in loc_committed.items():
+                            committed_lookup[f"{loc_id}:{iid}"] = qty
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to fetch committed quantities for location; "
+                            "proceeding without committed adjustment",
+                            tenant_id=tenant_id,
+                            location_id=loc_id,
+                            error=str(exc),
+                        )
+                total_committed = 0
+                for u in updates:
+                    key = f"{u['location_id']}:{u['inventory_item_id']}"
+                    committed = committed_lookup.get(key, 0)
+                    if committed > 0:
+                        u["available"] = u["available"] + committed
+                        total_committed += committed
+                logger.info(
+                    "Adjusted on_hand for Shopify committed quantities",
+                    tenant_id=tenant_id,
+                    total_committed_added=total_committed,
+                    items_with_committed=sum(
+                        1 for v in committed_lookup.values() if v > 0
+                    ),
+                )
 
             logger.info(
                 "Prepared stock updates",

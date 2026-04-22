@@ -617,8 +617,6 @@ async def _build_susoft_order(
         "lastName": last_name,
         "displayName": f"{first_name} {last_name}".strip() or last_name,
         "address": susoft_address,
-        "deliveryAddress": susoft_address,
-        "invoiceAddress": susoft_address,
     }
 
     # Build line items (per Susoft OrderLine schema: nested `product`, `text`, no `sku`/`productUuid`)

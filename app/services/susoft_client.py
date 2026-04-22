@@ -816,6 +816,26 @@ class SusoftClient:
             # suffix on alternativeId/uuid (mirrors Susoft's own internal
             # retry pattern visible in created orders).
             if "500" in err_str:
+                # Permanent errors (data integrity / missing master data)
+                # must NOT be retried with a suffixed altId — that just
+                # duplicates the failure and spams Susoft. Detect known
+                # permanent error markers and re-raise immediately.
+                permanent_markers = (
+                    "product not found",
+                    "customer not found",
+                    "invalid product",
+                    "no such product",
+                )
+                err_lower = err_str.lower()
+                if any(m in err_lower for m in permanent_markers):
+                    logger.error(
+                        "Susoft 500 with permanent error; not retrying",
+                        shopify_order_id=shopify_order_id,
+                        alternative_id=order_data["alternativeId"],
+                        error=err_str,
+                    )
+                    raise
+
                 try:
                     existing = await self.get_order_by_alternative_id(
                         order_data["alternativeId"]

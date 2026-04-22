@@ -729,15 +729,20 @@ async def _build_susoft_order(
     if shipping_amount > 0 and shipping_sku:
         shipping_mapping = await mapping_repo.get_by_sku(tenant_id, shipping_sku)
         # /order/pos rejects lines without product.id (error 400028
-        # "One or more order lines have no products"). Fall back to using
-        # the shipping SKU itself as the product id — Susoft typically has
-        # a product registered with id == "FRAKT" for this purpose.
+        # "One or more order lines have no products"). Resolution order:
+        # 1) explicit product mapping for the shipping SKU
+        # 2) SUSOFT_SHIPPING_PRODUCT_ID env var (Susoft-internal id like "10732")
+        # 3) the shipping SKU itself (only works if Susoft has a product
+        #    whose id literally equals the SKU, e.g. id="FRAKT").
         if shipping_mapping and shipping_mapping.susoft_product_id:
             shipping_product_id = shipping_mapping.susoft_product_id
+        elif settings.susoft_shipping_product_id:
+            shipping_product_id = settings.susoft_shipping_product_id
         else:
             shipping_product_id = shipping_sku
-            logger.info(
-                "Shipping SKU has no mapping; using SKU as Susoft product id",
+            logger.warning(
+                "No shipping mapping or SUSOFT_SHIPPING_PRODUCT_ID set; "
+                "falling back to SKU as product id (likely to fail on /order/pos)",
                 tenant_id=tenant_id,
                 shipping_sku=shipping_sku,
             )

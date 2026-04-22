@@ -148,6 +148,14 @@ class Settings(BaseSettings):
             "to the order. Set to empty string to disable."
         )
     )
+    susoft_shipping_product_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Explicit Susoft product id used for shipping lines on /order/pos. "
+            "Required when no product_mapping exists for the shipping SKU. "
+            "Find the id in Susoft under the FRAKT product (e.g. '10732')."
+        )
+    )
 
     # ===================
     # Webhook Registration

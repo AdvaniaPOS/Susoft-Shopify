@@ -215,14 +215,14 @@ async def _process_shopify_order_async(
                 # Create order in Susoft with idempotency.
                 # SusoftClient.create_order sets alternativeId/uuid from
                 # shopify_order_id internally.
-                # Force /order endpoint: /order/pos has a server-side bug
-                # where it reserves an orderNo but then returns 404
-                # ("Order not found @ ... idType:ORDER_NO"), leaving the
-                # alternativeId locked without an actual order being saved.
+                # use_pos_endpoint=None -> auto: paid orders go to /order/pos
+                # (deducts stock immediately, like an aPOS sale); unpaid
+                # orders go to /order (waits for invoicing). create_order
+                # has built-in fallback from /order/pos -> /order if POS fails.
                 result = await susoft_client.create_order(
                     order_data=susoft_order,
                     shopify_order_id=order_id,
-                    use_pos_endpoint=False,
+                    use_pos_endpoint=None,
                 )
                 
                 # Update sync log as success

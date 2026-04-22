@@ -94,11 +94,12 @@ celery_app.conf.update(
             "task": "app.workers.scheduled_tasks.schedule_tenant_stock_syncs",
             "schedule": 60.0,  # 1 minute
         },
-        # Queue product attribute syncs (name/price/category/VAT) every 5 min,
-        # actual per-tenant throttling happens inside the scheduler.
+        # Run product attribute sync at xx:00 and xx:30 (every 30 min,
+        # aligned to half-hour marks). Per-tenant throttling inside the
+        # scheduler is now mostly redundant but kept as a safety net.
         "tenant-product-sync-scheduler": {
             "task": "app.workers.scheduled_tasks.schedule_tenant_product_syncs",
-            "schedule": 300.0,  # 5 minutes
+            "schedule": crontab(minute="0,30"),
         },
         # Full stock sync daily at 3 AM
         "daily-stock-reconciliation": {

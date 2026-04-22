@@ -285,9 +285,9 @@ async def _schedule_tenant_stock_syncs_async():
 
 
 # Default cadence for product attribute sync (name/price/category/VAT).
-# Susoft master data doesn't change as often as stock, so 30 min is a
-# reasonable balance between freshness and API load.
-PRODUCT_SYNC_INTERVAL_SECONDS = 30 * 60
+# The actual schedule is now controlled by celery beat (cron xx:00, xx:30).
+# This throttle is a safety net so a stuck/slow run doesn't get re-queued.
+PRODUCT_SYNC_INTERVAL_SECONDS = 25 * 60
 
 
 @celery_app.task

@@ -492,6 +492,54 @@ class ShopifyClient:
         )
         return result.get("product", {})
 
+    async def create_product(
+        self,
+        product: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Create a Shopify product (REST). Returns the created product
+        including default variant id, inventory_item_id, etc.
+
+        Args:
+            product: Dict of product fields. Common keys:
+                ``title``, ``product_type``, ``vendor``, ``status``
+                ("active"/"draft"), ``tags``, ``variants`` (list of
+                variant dicts with ``sku``, ``barcode``, ``price``,
+                ``taxable``, ``inventory_management``).
+
+        Returns:
+            Created product data with assigned ids.
+        """
+        payload = {"product": product}
+        result = await self._rest_request(
+            "POST",
+            "/products.json",
+            json_data=payload,
+        )
+        return result.get("product", {})
+
+    async def set_inventory_level(
+        self,
+        inventory_item_id: str,
+        location_id: str,
+        available: int,
+    ) -> Dict[str, Any]:
+        """
+        Set the on-hand quantity for an inventory item at a location.
+        Used after creating a new product so initial stock is visible.
+        """
+        payload = {
+            "inventory_item_id": int(inventory_item_id),
+            "location_id": int(location_id),
+            "available": int(available),
+        }
+        result = await self._rest_request(
+            "POST",
+            "/inventory_levels/set.json",
+            json_data=payload,
+        )
+        return result.get("inventory_level", {})
+
     async def update_variant(
         self,
         variant_id: str,

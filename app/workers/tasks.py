@@ -11,8 +11,9 @@ All tasks:
 """
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+import os
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List, Optional
 import uuid
 
 from celery import Task
@@ -1315,8 +1316,6 @@ def _extract_susoft_product_fields(p: Dict[str, Any]) -> Dict[str, Any]:
     fields rather than overwriting Shopify values with empty data.
     """
     name = p.get("name") or p.get("productName") or p.get("title")
-
-    # Price: prefer retail price including VAT (matches Shopify storefront
     # price in Norway). Susoft's /product/list/modified uses `retailPrice`
     # (gross, incl VAT). Fall back to other common variants for safety.
     price = (
@@ -1354,6 +1353,8 @@ def _extract_susoft_product_fields(p: Dict[str, Any]) -> Dict[str, Any]:
         "price": price,
         "vat_rate": vat_rate,
         "category": category.strip() if isinstance(category, str) else category,
+        "barcode": (p.get("barcode") or "").strip() or None,
+        "active": p.get("active") if "active" in p else True,
     }
 
 
@@ -1399,19 +1400,101 @@ def sync_products_to_shopify(self, tenant_id: str):
             pass
 
 
+async def _create_shopify_product_from_susoft(
+    shopify_client,
+    susoft_fields: Dict[str, Any],
+    susoft_id: str,
+    raw: Dict[str, Any],
+    default_location_id: str,
+) -> Dict[str, Any]:
+    """Create a Shopify product mirroring a Susoft product.
+
+    Returns a dict with ``id``, ``variant_id``, ``inventory_item_id`` so the
+    caller can persist the mapping. Initial stock is set to whatever Susoft
+    reports (will be reconciled later by the regular stock sync).
+    """
+    price_str = _format_price(susoft_fields["price"]) or "0.00"
+    vat_rate = susoft_fields["vat_rate"]
+    try:
+        taxable = float(vat_rate) > 0 if vat_rate is not None else True
+    except (TypeError, ValueError):
+        taxable = True
+
+    sku = str(susoft_fields.get("barcode") or susoft_id)
+    barcode = susoft_fields.get("barcode") or ""
+
+    product_payload: Dict[str, Any] = {
+        "title": susoft_fields["name"],
+        "status": "active",
+        "variants": [{
+            "sku": sku,
+            "barcode": barcode,
+            "price": price_str,
+            "taxable": taxable,
+            "inventory_management": "shopify",
+        }],
+    }
+    if susoft_fields.get("category"):
+        product_payload["product_type"] = susoft_fields["category"]
+
+    created = await shopify_client.create_product(product_payload)
+    variants = created.get("variants") or []
+    if not variants:
+        raise ShopifyAPIError("Shopify product create returned no variants")
+    variant = variants[0]
+
+    inventory_item_id = variant.get("inventory_item_id")
+
+    # Set initial on-hand stock from Susoft so the new product isn't
+    # stuck at 0. Stock sync will keep it in sync afterwards.
+    stock_obj = raw.get("stock") if isinstance(raw, dict) else None
+    if isinstance(stock_obj, dict):
+        susoft_qty = int(stock_obj.get("stock") or 0)
+    else:
+        try:
+            susoft_qty = int(stock_obj or 0)
+        except (TypeError, ValueError):
+            susoft_qty = 0
+
+    if inventory_item_id and susoft_qty > 0:
+        try:
+            await shopify_client.set_inventory_level(
+                inventory_item_id=str(inventory_item_id),
+                location_id=str(default_location_id),
+                available=susoft_qty,
+            )
+        except ShopifyAPIError as exc:
+            logger.warning(
+                "Created product but failed to set initial stock",
+                susoft_product_id=susoft_id,
+                shopify_inventory_item_id=inventory_item_id,
+                error=str(exc),
+            )
+
+    return {
+        "id": created.get("id"),
+        "variant_id": variant.get("id"),
+        "inventory_item_id": inventory_item_id,
+    }
+
+
 async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
-    """Async implementation of product attribute sync."""
+    """Async implementation of product attribute sync.
+
+    Uses Susoft's ``/product/list/modified`` endpoint with a Redis-tracked
+    cursor so each run only fetches products changed since the previous
+    successful run. For each modified product:
+
+    * If a mapping exists -> update Shopify (title/price/VAT/category).
+    * If no mapping exists -> create a new Shopify product, set initial
+      stock, and persist the mapping so future runs update it.
+    """
     async with get_session_context() as session:
         tenant_repo = TenantRepository(session)
         mapping_repo = ProductMappingRepository(session)
 
         tenant = await tenant_repo.get_by_id(tenant_id)
         if not tenant or not tenant.is_active:
-            return
-
-        mappings = await mapping_repo.get_active_mappings(tenant_id)
-        if not mappings:
-            logger.info("No mappings to sync product attributes for", tenant_id=tenant_id)
             return
 
         susoft_client = create_susoft_client(
@@ -1424,40 +1507,159 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
             access_token_encrypted=tenant.shopify_access_token_encrypted,
         )
 
+        # Resolve cursor for incremental fetch. On first run we look back
+        # PRODUCT_SYNC_INITIAL_LOOKBACK_DAYS days so we don't immediately
+        # mass-create 9000+ products in Shopify.
+        cursor_key = f"product_sync:cursor:{tenant_id}"
+        PRODUCT_SYNC_INITIAL_LOOKBACK_DAYS = int(
+            os.environ.get("PRODUCT_SYNC_INITIAL_LOOKBACK_DAYS", "1")
+        )
+        try:
+            raw_cursor = redis_client.get(cursor_key)
+        except Exception:
+            raw_cursor = None
+        if raw_cursor:
+            try:
+                since = datetime.fromisoformat(raw_cursor.decode("utf-8"))
+                if since.tzinfo is None:
+                    since = since.replace(tzinfo=timezone.utc)
+            except Exception:
+                since = datetime.now(timezone.utc) - timedelta(
+                    days=PRODUCT_SYNC_INITIAL_LOOKBACK_DAYS
+                )
+        else:
+            since = datetime.now(timezone.utc) - timedelta(
+                days=PRODUCT_SYNC_INITIAL_LOOKBACK_DAYS
+            )
+
+        run_started = datetime.now(timezone.utc)
+
         async with susoft_client, shopify_client:
-            susoft_products = await susoft_client.get_all_products()
+            # Page through modified products. Each page is up to 100 items.
+            modified_products: List[Dict[str, Any]] = []
+            page = 0
+            page_size = 100
+            while True:
+                batch = await susoft_client.get_products_modified_since(
+                    since=since, page=page, page_size=page_size
+                )
+                if not batch:
+                    break
+                modified_products.extend(batch)
+                if len(batch) < page_size:
+                    break
+                page += 1
+                if page > 200:  # 20k product safety cap
+                    logger.warning(
+                        "Product sync aborted page loop (safety cap)",
+                        tenant_id=tenant_id,
+                        pages=page,
+                    )
+                    break
+
+            if not modified_products:
+                logger.info(
+                    "No modified products since last run",
+                    tenant_id=tenant_id,
+                    since=since.isoformat(),
+                )
+                # Still advance cursor so we don't keep widening the window.
+                try:
+                    redis_client.set(
+                        cursor_key, run_started.isoformat(), ex=30 * 24 * 3600
+                    )
+                except Exception:
+                    pass
+                return
 
             # Build lookup: susoft product id -> normalized fields
             product_lookup: Dict[str, Dict[str, Any]] = {}
-            for raw in susoft_products:
+            raw_lookup: Dict[str, Dict[str, Any]] = {}
+            for raw in modified_products:
                 pid = raw.get("id") or raw.get("productId")
                 if pid is None:
                     continue
                 product_lookup[str(pid)] = _extract_susoft_product_fields(raw)
+                raw_lookup[str(pid)] = raw
 
             logger.info(
                 "Starting product attribute sync",
                 tenant_id=tenant_id,
-                susoft_products=len(susoft_products),
-                mappings=len(mappings),
+                modified_products=len(modified_products),
+                since=since.isoformat(),
             )
 
             updated_products = 0
             updated_variants = 0
-            unmatched = 0
+            created_products = 0
             skipped = 0
             errors = 0
 
             # Cache product fetches across mappings sharing the same Shopify product
             product_cache: Dict[str, Dict[str, Any]] = {}
 
-            for mapping in mappings:
-                key = str(mapping.susoft_product_id)
-                susoft_fields = product_lookup.get(key)
-                if not susoft_fields:
-                    unmatched += 1
+            default_location_id = tenant.shopify_default_location_id
+
+            for susoft_id, susoft_fields in product_lookup.items():
+                mapping = await mapping_repo.get_by_susoft_id(tenant_id, susoft_id)
+
+                # ---------------------------------------------------------
+                # Auto-create branch: no mapping yet
+                # ---------------------------------------------------------
+                if not mapping:
+                    if not susoft_fields.get("active", True):
+                        skipped += 1
+                        continue
+                    if not susoft_fields["name"]:
+                        skipped += 1
+                        continue
+                    if not default_location_id:
+                        logger.warning(
+                            "Cannot auto-create product without default location",
+                            tenant_id=tenant_id,
+                            susoft_product_id=susoft_id,
+                        )
+                        skipped += 1
+                        continue
+
+                    try:
+                        new_product = await _create_shopify_product_from_susoft(
+                            shopify_client=shopify_client,
+                            susoft_fields=susoft_fields,
+                            susoft_id=susoft_id,
+                            raw=raw_lookup.get(susoft_id, {}),
+                            default_location_id=default_location_id,
+                        )
+                        await mapping_repo.create(
+                            tenant_id=tenant_id,
+                            sku=str(susoft_fields.get("barcode") or susoft_id),
+                            susoft_product_id=str(susoft_id),
+                            shopify_product_id=str(new_product["id"]),
+                            shopify_variant_id=str(new_product["variant_id"]),
+                            shopify_inventory_item_id=str(new_product["inventory_item_id"]),
+                            shopify_location_id=str(default_location_id),
+                        )
+                        created_products += 1
+                        logger.info(
+                            "Auto-created Shopify product from Susoft",
+                            tenant_id=tenant_id,
+                            susoft_product_id=susoft_id,
+                            shopify_product_id=new_product["id"],
+                            title=susoft_fields["name"],
+                        )
+                    except ShopifyAPIError as exc:
+                        errors += 1
+                        logger.warning(
+                            "Failed to auto-create Shopify product",
+                            tenant_id=tenant_id,
+                            susoft_product_id=susoft_id,
+                            error=str(exc),
+                        )
                     continue
 
+                # ---------------------------------------------------------
+                # Update branch: mapping exists
+                # ---------------------------------------------------------
                 if not mapping.shopify_product_id or not mapping.shopify_variant_id:
                     skipped += 1
                     continue
@@ -1524,7 +1726,7 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                     logger.warning(
                         "Failed to sync product attributes",
                         tenant_id=tenant_id,
-                        susoft_product_id=key,
+                        susoft_product_id=susoft_id,
                         shopify_product_id=mapping.shopify_product_id,
                         error=str(exc),
                     )
@@ -1532,19 +1734,25 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
             logger.info(
                 "Product attribute sync completed",
                 tenant_id=tenant_id,
+                created_products=created_products,
                 updated_products=updated_products,
                 updated_variants=updated_variants,
-                unmatched=unmatched,
-                skipped_no_shopify_ids=skipped,
+                skipped=skipped,
                 errors=errors,
             )
 
-            # Record last run in Redis so the scheduler can throttle.
+            # Record last run + advance cursor so the next run only fetches
+            # products modified after this one started.
             try:
                 redis_client.set(
                     f"product_sync:last:{tenant_id}",
                     datetime.now(timezone.utc).isoformat(),
                     ex=7 * 24 * 3600,  # keep for 7 days
+                )
+                redis_client.set(
+                    cursor_key,
+                    run_started.isoformat(),
+                    ex=30 * 24 * 3600,
                 )
             except Exception:
                 pass

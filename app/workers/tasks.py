@@ -680,6 +680,15 @@ async def _build_susoft_order(
     )
 
     shipping_sku = settings.shopify_shipping_sku
+    logger.info(
+        "Shipping detection",
+        tenant_id=tenant_id,
+        shopify_order=order_data.get("name"),
+        shipping_lines_count=len(shipping_lines),
+        shipping_amount=shipping_amount,
+        shipping_sku=shipping_sku,
+        total_shipping_price_set=order_data.get("total_shipping_price_set"),
+    )
     if shipping_amount > 0 and shipping_sku:
         shipping_mapping = await mapping_repo.get_by_sku(tenant_id, shipping_sku)
         shipping_product: Dict[str, Any] = {"barcode": shipping_sku}

@@ -21,6 +21,7 @@ from uuid import UUID
 import structlog
 
 import httpx
+import redis.asyncio as aioredis
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -33,6 +34,24 @@ from app.core.security import decrypt_credential
 
 
 logger = structlog.get_logger()
+
+# Shared async Redis connection for cross-worker JWT caching.
+# Susoft rate-limits /user/auth aggressively, so we must NOT login per task.
+_redis: Optional[aioredis.Redis] = None
+
+
+def _get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    return _redis
+
+
+# Cache JWT for 25 minutes — comfortably under any typical 30-60 min token TTL.
+SUSOFT_TOKEN_TTL_SECONDS = 25 * 60
+# Lock TTL — long enough to cover a slow /user/auth round trip, short enough
+# that a crashed worker doesn't block others forever.
+SUSOFT_LOGIN_LOCK_TTL_SECONDS = 30
 
 
 class SusoftAPIError(Exception):
@@ -172,54 +191,139 @@ class SusoftClient:
             )
 
             if self._login and self._password:
-                await self._authenticate()
+                # Try cached JWT first to avoid hammering /user/auth
+                cached = await self._load_cached_token()
+                if cached:
+                    self._token = cached
+                    logger.debug(
+                        "Using cached Susoft JWT",
+                        login=self._login,
+                        shop_url_key=self.shop_url_key,
+                    )
+                else:
+                    await self._authenticate()
+
+    def _token_cache_key(self) -> str:
+        return f"susoft:token:{self.shop_url_key}:{self._login}"
+
+    def _login_lock_key(self) -> str:
+        return f"susoft:login_lock:{self.shop_url_key}:{self._login}"
+
+    async def _load_cached_token(self) -> Optional[str]:
+        try:
+            return await _get_redis().get(self._token_cache_key())
+        except Exception as exc:
+            logger.warning("Susoft token cache read failed", error=str(exc))
+            return None
+
+    async def _store_cached_token(self, token: str) -> None:
+        try:
+            await _get_redis().set(
+                self._token_cache_key(), token, ex=SUSOFT_TOKEN_TTL_SECONDS
+            )
+        except Exception as exc:
+            logger.warning("Susoft token cache write failed", error=str(exc))
+
+    async def _invalidate_cached_token(self) -> None:
+        try:
+            await _get_redis().delete(self._token_cache_key())
+        except Exception as exc:
+            logger.warning("Susoft token cache delete failed", error=str(exc))
 
     async def _authenticate(self) -> None:
-        """Sign in to Susoft via POST /user/auth and cache the JWT."""
+        """Sign in to Susoft via POST /user/auth and cache the JWT.
+
+        Uses a Redis distributed lock to prevent a thundering herd of
+        login requests across workers. If we can't acquire the lock,
+        we briefly poll the cache for a token written by the holder.
+        """
         if not (self._login and self._password):
             raise SusoftAuthenticationError(
                 "Cannot authenticate: no login/password configured"
             )
         assert self._client is not None
 
-        logger.info(
-            "Authenticating with Susoft",
-            login=self._login,
-            shop_url_key=self.shop_url_key,
-        )
-
-        response = await self._client.post(
-            "/user/auth",
-            json={"login": self._login, "password": self._password},
-            headers={
-                "X-Shop-Url-Key": self.shop_url_key,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-
-        if response.status_code != 200:
-            body = response.text
-            raise SusoftAuthenticationError(
-                f"Susoft login failed: HTTP {response.status_code} {body}",
-                status_code=response.status_code,
+        redis_conn = _get_redis()
+        lock_key = self._login_lock_key()
+        # SET NX EX — atomic acquire
+        acquired = False
+        try:
+            acquired = bool(
+                await redis_conn.set(
+                    lock_key, "1", nx=True, ex=SUSOFT_LOGIN_LOCK_TTL_SECONDS
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Susoft login lock acquire failed; proceeding without lock",
+                error=str(exc),
             )
 
-        data = response.json() or {}
-        token = data.get("token")
-        if not token or not data.get("success", True):
-            raise SusoftAuthenticationError(
-                f"Susoft login returned no token: {data}",
-                status_code=response.status_code,
-                response_body=data,
+        if not acquired:
+            # Another worker is logging in. Poll the cache briefly.
+            for _ in range(20):  # ~10s total
+                await asyncio.sleep(0.5)
+                cached = await self._load_cached_token()
+                if cached:
+                    self._token = cached
+                    logger.info(
+                        "Picked up Susoft JWT from concurrent login",
+                        login=self._login,
+                        shop_url_key=self.shop_url_key,
+                    )
+                    return
+            # Holder didn't publish in time; fall through and try ourselves.
+            logger.warning(
+                "Susoft login lock holder didn't publish token; attempting login anyway",
+                login=self._login,
             )
-        self._token = token
-        logger.info(
-            "Susoft authentication succeeded",
-            login=self._login,
-            shop_url_key=self.shop_url_key,
-            token_preview=(token[:12] + "...") if token else None,
-        )
+
+        try:
+            logger.info(
+                "Authenticating with Susoft",
+                login=self._login,
+                shop_url_key=self.shop_url_key,
+            )
+
+            response = await self._client.post(
+                "/user/auth",
+                json={"login": self._login, "password": self._password},
+                headers={
+                    "X-Shop-Url-Key": self.shop_url_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+
+            if response.status_code != 200:
+                body = response.text
+                raise SusoftAuthenticationError(
+                    f"Susoft login failed: HTTP {response.status_code} {body}",
+                    status_code=response.status_code,
+                )
+
+            data = response.json() or {}
+            token = data.get("token")
+            if not token or not data.get("success", True):
+                raise SusoftAuthenticationError(
+                    f"Susoft login returned no token: {data}",
+                    status_code=response.status_code,
+                    response_body=data,
+                )
+            self._token = token
+            await self._store_cached_token(token)
+            logger.info(
+                "Susoft authentication succeeded",
+                login=self._login,
+                shop_url_key=self.shop_url_key,
+                token_preview=(token[:12] + "...") if token else None,
+            )
+        finally:
+            if acquired:
+                try:
+                    await redis_conn.delete(lock_key)
+                except Exception:
+                    pass
     
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -286,6 +390,8 @@ class SusoftClient:
                 # If we have login/password, try a single re-auth and retry once.
                 if self._login and self._password:
                     logger.info("Susoft returned 401, re-authenticating and retrying once")
+                    # Cached token is stale; force a fresh login.
+                    await self._invalidate_cached_token()
                     await self._authenticate()
                     response = await self._client.request(
                         method=method,

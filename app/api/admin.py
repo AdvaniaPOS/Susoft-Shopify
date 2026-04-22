@@ -28,7 +28,8 @@ from app.db.repositories import (
     IntegrationQueueRepository
 )
 from app.services.shopify_webhooks import reconcile_tenant_webhooks
-from app.workers.tasks import sync_stock_to_shopify, retry_dlq_item
+from app.workers.tasks import sync_stock_to_shopify, sync_products_to_shopify, retry_dlq_item
+from app.workers.tasks import redis_client as _tasks_redis
 
 
 logger = structlog.get_logger()
@@ -591,6 +592,38 @@ async def trigger_stock_sync(
     
     logger.info("Manual stock sync triggered", tenant_id=tenant_id)
     
+    return {"status": "queued"}
+
+
+@router.post("/tenants/{tenant_id}/sync-products")
+async def trigger_product_sync(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: bool = Depends(verify_admin_key)
+):
+    """Trigger a full product attribute sync (name/price/category/VAT) for a tenant.
+
+    Clears the 30-min throttle so it runs immediately.
+    """
+    tenant_repo = TenantRepository(session)
+
+    tenant = await tenant_repo.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Clear throttle marker so the task isn't skipped by the scheduler
+    # the next time, and (more importantly) the task itself runs now.
+    try:
+        _tasks_redis.delete(f"product_sync:last:{tenant_id}")
+    except Exception:
+        pass
+
+    sync_products_to_shopify.apply_async(
+        kwargs={"tenant_id": tenant_id},
+        queue="products",
+    )
+
+    logger.info("Manual product sync triggered", tenant_id=tenant_id)
     return {"status": "queued"}
 
 

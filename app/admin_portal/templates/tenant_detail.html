@@ -33,7 +33,11 @@
                         </button>
                         <button @click="triggerSync()"
                                 class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-                            🔄 Synkroniser
+                            🔄 Synk lager
+                        </button>
+                        <button @click="triggerProductSync()"
+                                class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
+                            🏷️ Synk produkter
                         </button>
                     </div>
                 </div>
@@ -213,7 +217,16 @@ function tenantDetail(tenantId) {
         async triggerSync() {
             try {
                 await apiCall(`/tenants/${tenantId}/sync-stock`, 'POST');
-                this.showMessage('Synkronisering startet!', 'success');
+                this.showMessage('Lagersynkronisering startet!', 'success');
+            } catch (err) {
+                this.showMessage('Feil: ' + err.message, 'error');
+            }
+        },
+
+        async triggerProductSync() {
+            try {
+                await apiCall(`/tenants/${tenantId}/sync-products`, 'POST');
+                this.showMessage('Produktsynkronisering startet (navn/pris/MVA)!', 'success');
             } catch (err) {
                 this.showMessage('Feil: ' + err.message, 'error');
             }

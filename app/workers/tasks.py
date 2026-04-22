@@ -1607,6 +1607,23 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                 # Auto-create branch: no mapping yet
                 # ---------------------------------------------------------
                 if not mapping:
+                    # Never auto-create the shipping/FRAKT product — it's
+                    # handled as a virtual order line and must not become a
+                    # real Shopify product (would otherwise be created on
+                    # every run since no mapping exists).
+                    shipping_id = settings.susoft_shipping_product_id
+                    shipping_sku = settings.shopify_shipping_sku
+                    if shipping_id and str(susoft_id) == str(shipping_id):
+                        skipped += 1
+                        continue
+                    if (
+                        shipping_sku
+                        and susoft_fields.get("barcode")
+                        and str(susoft_fields["barcode"]).upper()
+                        == str(shipping_sku).upper()
+                    ):
+                        skipped += 1
+                        continue
                     if not susoft_fields.get("active", True):
                         skipped += 1
                         continue

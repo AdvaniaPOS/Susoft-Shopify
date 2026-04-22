@@ -728,15 +728,23 @@ async def _build_susoft_order(
     )
     if shipping_amount > 0 and shipping_sku:
         shipping_mapping = await mapping_repo.get_by_sku(tenant_id, shipping_sku)
-        shipping_product: Dict[str, Any] = {"barcode": shipping_sku}
+        # /order/pos rejects lines without product.id (error 400028
+        # "One or more order lines have no products"). Fall back to using
+        # the shipping SKU itself as the product id — Susoft typically has
+        # a product registered with id == "FRAKT" for this purpose.
         if shipping_mapping and shipping_mapping.susoft_product_id:
-            shipping_product["id"] = shipping_mapping.susoft_product_id
+            shipping_product_id = shipping_mapping.susoft_product_id
         else:
-            logger.warning(
-                "Shipping SKU has no mapping; sending shipping line with barcode only",
+            shipping_product_id = shipping_sku
+            logger.info(
+                "Shipping SKU has no mapping; using SKU as Susoft product id",
                 tenant_id=tenant_id,
                 shipping_sku=shipping_sku,
             )
+        shipping_product: Dict[str, Any] = {
+            "id": shipping_product_id,
+            "barcode": shipping_sku,
+        }
 
         lines.append({
             "lineNo": next_line_no,

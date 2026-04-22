@@ -252,11 +252,6 @@ class DLQItemResponse(BaseModel):
     def _uuid_to_str(cls, v):
         return str(v) if v is not None else v
 
-    @field_validator("id", mode="before")
-    @classmethod
-    def _uuid_to_str(cls, v):
-        return str(v) if v is not None else v
-
 
 class DashboardStats(BaseModel):
     """Response model for dashboard statistics."""

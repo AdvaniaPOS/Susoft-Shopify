@@ -1154,9 +1154,27 @@ def sync_products_to_shopify(self, tenant_id: str):
     run on a schedule (e.g. every 30 min) and is safe to run concurrently
     with stock sync.
     """
-    asyncio.get_event_loop().run_until_complete(
-        _sync_products_to_shopify_async(task=self, tenant_id=tenant_id)
-    )
+    # Distributed lock so only one product sync runs per tenant at a time.
+    # Without this, multiple workers fan out and each pulls the full
+    # Susoft product catalogue in parallel, hammering /product/list/modified
+    # and triggering 429s on every other request.
+    lock_key = f"product_sync_lock:{tenant_id}"
+    lock = redis_client.lock(lock_key, timeout=600)  # 10 min safety timeout
+    if not lock.acquire(blocking=False):
+        logger.info(
+            "Product sync already running for tenant; skipping",
+            tenant_id=tenant_id,
+        )
+        return
+    try:
+        asyncio.get_event_loop().run_until_complete(
+            _sync_products_to_shopify_async(task=self, tenant_id=tenant_id)
+        )
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 
 async def _sync_products_to_shopify_async(task: Task, tenant_id: str):

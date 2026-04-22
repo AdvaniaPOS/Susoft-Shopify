@@ -52,7 +52,16 @@ class SusoftAuthenticationError(SusoftAPIError):
 
 class SusoftRateLimitError(SusoftAPIError):
     """Raised when rate limited."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        response_body: Optional[dict] = None,
+        retry_after: Optional[float] = None,
+    ):
+        super().__init__(message, status_code=status_code, response_body=response_body)
+        self.retry_after = retry_after
 
 
 class SusoftValidationError(SusoftAPIError):
@@ -292,9 +301,17 @@ class SusoftClient:
                     )
             
             if response.status_code == 429:
+                retry_after_raw = response.headers.get("Retry-After")
+                retry_after: Optional[float] = None
+                if retry_after_raw:
+                    try:
+                        retry_after = float(retry_after_raw)
+                    except (TypeError, ValueError):
+                        retry_after = None
                 raise SusoftRateLimitError(
                     "Rate limit exceeded",
-                    status_code=429
+                    status_code=429,
+                    retry_after=retry_after,
                 )
             
             if response.status_code == 400:
@@ -456,38 +473,86 @@ class SusoftClient:
         page = 0
         consecutive_failures = 0
         max_consecutive_failures = 5
+        # Per-page retry budget so a transient 429/500 doesn't truncate
+        # the product list (we used to skip the page outright, which left
+        # mappings unmatched and triggered repeated full re-syncs).
+        max_page_retries = 5
         while page < max_pages:
-            try:
-                batch = await self.get_products_modified_since(
-                    since=epoch,
-                    page=page,
-                    page_size=page_size,
-                )
-                consecutive_failures = 0
-            except SusoftAPIError as e:
-                # Some Susoft tenants have "poison" pages that return 500/429
-                # for specific products. Skip and keep paging; only give up
-                # after many consecutive failures.
-                if e.status_code in (429, 500, 502, 503, 504):
-                    consecutive_failures += 1
-                    logger.warning(
-                        "Susoft product list page failed; skipping",
+            page_attempt = 0
+            while True:
+                try:
+                    batch = await self.get_products_modified_since(
+                        since=epoch,
                         page=page,
-                        status=e.status_code,
-                        consecutive_failures=consecutive_failures,
-                        collected=len(all_products),
+                        page_size=page_size,
                     )
-                    if consecutive_failures >= max_consecutive_failures:
-                        logger.warning(
-                            "Too many consecutive failures; stopping pagination",
-                            page=page,
-                            collected=len(all_products),
-                        )
+                    consecutive_failures = 0
+                    break  # success, exit retry loop
+                except SusoftRateLimitError as e:
+                    page_attempt += 1
+                    # Honour Retry-After if Susoft sent one, otherwise
+                    # exponential backoff capped at 30s.
+                    delay = e.retry_after if e.retry_after else min(2 ** page_attempt, 30)
+                    logger.warning(
+                        "Susoft 429 on product list page; backing off",
+                        page=page,
+                        attempt=page_attempt,
+                        delay=delay,
+                    )
+                    if page_attempt >= max_page_retries:
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.warning(
+                                "Too many consecutive failures; stopping pagination",
+                                page=page,
+                                collected=len(all_products),
+                            )
+                            return all_products
+                        # Give up on this page after exhausting retries,
+                        # advance to next page to avoid infinite loop.
+                        page += 1
+                        batch = []
                         break
-                    page += 1
+                    await asyncio.sleep(delay)
                     continue
-                raise
+                except SusoftAPIError as e:
+                    if e.status_code in (500, 502, 503, 504):
+                        page_attempt += 1
+                        delay = min(2 ** page_attempt, 30)
+                        logger.warning(
+                            "Susoft transient error on product list page; backing off",
+                            page=page,
+                            status=e.status_code,
+                            attempt=page_attempt,
+                            delay=delay,
+                        )
+                        if page_attempt >= max_page_retries:
+                            consecutive_failures += 1
+                            logger.warning(
+                                "Susoft product list page failed after retries; skipping",
+                                page=page,
+                                status=e.status_code,
+                                consecutive_failures=consecutive_failures,
+                                collected=len(all_products),
+                            )
+                            if consecutive_failures >= max_consecutive_failures:
+                                logger.warning(
+                                    "Too many consecutive failures; stopping pagination",
+                                    page=page,
+                                    collected=len(all_products),
+                                )
+                                return all_products
+                            page += 1
+                            batch = []
+                            break
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
             if not batch:
+                # Either real end-of-list or we just gave up on this page.
+                # If we gave up (page advanced), keep looping; else stop.
+                if page_attempt >= max_page_retries:
+                    continue
                 break
             all_products.extend(batch)
             if len(batch) < page_size:

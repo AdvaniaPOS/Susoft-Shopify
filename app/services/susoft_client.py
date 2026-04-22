@@ -870,27 +870,35 @@ class SusoftClient:
             # Check if the order exists before falling back to avoid duplicate
             # creation attempts.
             if use_pos_endpoint and endpoint == "/order/pos":
-                try:
-                    existing = await self.get_order_by_alternative_id(
-                        order_data["alternativeId"]
+                # Try to find order via altId or uuid (Susoft may index under
+                # either depending on which internal step succeeded). Retry
+                # once after a short sleep in case of replication lag.
+                existing = await self._find_existing_order(
+                    order_data["alternativeId"], retries=2
+                )
+                if existing:
+                    logger.info(
+                        "/order/pos returned error but order was created",
+                        shopify_order_id=shopify_order_id,
+                        alternative_id=order_data["alternativeId"],
+                        error=err_str,
                     )
-                    if existing:
-                        logger.info(
-                            "/order/pos returned error but order was created",
-                            shopify_order_id=shopify_order_id,
-                            alternative_id=order_data["alternativeId"],
-                            error=err_str,
-                        )
-                        return existing
-                except Exception:
-                    pass
+                    return existing
 
+                # /order/pos may have locked the alternativeId server-side
+                # without actually persisting the order. Suffix the altId
+                # before fallback so /order doesn't immediately 409.
+                import time as _time
+                fallback_alt = f"{order_data['alternativeId']}-F{int(_time.time())}"
                 logger.warning(
-                    "/order/pos failed, falling back to /order",
+                    "/order/pos failed and lookup found nothing; falling back to /order with suffixed altId",
                     shopify_order_id=shopify_order_id,
                     error=err_str,
+                    original_alt=order_data["alternativeId"],
+                    fallback_alt=fallback_alt,
                 )
-                order_data["uuid"] = f"SHOPIFY-{shopify_order_id}"
+                order_data["alternativeId"] = fallback_alt
+                order_data["uuid"] = fallback_alt
                 try:
                     return await self._request(
                         "POST",
@@ -906,14 +914,16 @@ class SusoftClient:
                             shopify_order_id=shopify_order_id,
                             alternative_id=order_data["alternativeId"],
                         )
-                        try:
-                            existing = await self.get_order_by_alternative_id(
-                                order_data["alternativeId"]
-                            )
-                            if existing:
-                                return existing
-                        except Exception:
-                            pass
+                        existing = await self._find_existing_order(
+                            order_data["alternativeId"], retries=2
+                        )
+                        if existing:
+                            return existing
+                        logger.warning(
+                            "Fallback /order 409 but order not findable — returning stub",
+                            shopify_order_id=shopify_order_id,
+                            alternative_id=order_data["alternativeId"],
+                        )
                         return {
                             "alternativeId": order_data["alternativeId"],
                             "status": "exists",
@@ -921,6 +931,37 @@ class SusoftClient:
                         }
                     raise
             raise
+
+    async def _find_existing_order(
+        self, alt_id: str, retries: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Look up an order by altId, then by uuid, with optional retry.
+
+        Susoft may index a freshly-created order asynchronously, and may
+        store it under altId, uuid, or both depending on which endpoint
+        was used.
+        """
+        for attempt in range(retries + 1):
+            try:
+                found = await self.get_order_by_alternative_id(alt_id)
+                if found:
+                    return found
+            except Exception as exc:
+                logger.debug(
+                    "altId lookup failed", alt_id=alt_id, attempt=attempt, error=str(exc)
+                )
+            try:
+                found = await self.get_order_by_uuid(alt_id)
+                if found:
+                    return found
+            except Exception as exc:
+                logger.debug(
+                    "uuid lookup failed", alt_id=alt_id, attempt=attempt, error=str(exc)
+                )
+            if attempt < retries:
+                await asyncio.sleep(1.0)
+        return None
     
     async def get_order_by_alternative_id(self, alt_id: str) -> Optional[Dict[str, Any]]:
         """

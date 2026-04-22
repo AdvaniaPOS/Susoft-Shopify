@@ -1430,6 +1430,9 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
             unmatched = 0
             skipped = 0
             errors = 0
+            # Diagnostic: log first few susoft payloads so we can see actual field
+            # names (Susoft schemas vary between deployments).
+            sample_logged = 0
 
             # Cache product fetches across mappings sharing the same Shopify product
             product_cache: Dict[str, Dict[str, Any]] = {}
@@ -1463,6 +1466,37 @@ async def _sync_products_to_shopify_async(task: Task, tenant_id: str):
                         and susoft_fields["category"] != shop_product.get("product_type")
                     ):
                         product_updates["product_type"] = susoft_fields["category"]
+
+                    # Diagnostic: log first 3 comparisons so we can see what
+                    # Susoft actually sends vs what Shopify currently has.
+                    if sample_logged < 3:
+                        # Find raw susoft payload for this product to surface
+                        # any title-like fields we might be missing.
+                        raw = next(
+                            (p for p in susoft_products
+                             if str(p.get("id") or p.get("productId")) == key),
+                            None,
+                        )
+                        title_like = {}
+                        if isinstance(raw, dict):
+                            for k in ("name", "productName", "title", "displayName",
+                                      "description", "shortDescription", "longName"):
+                                if k in raw:
+                                    title_like[k] = raw[k]
+                        logger.info(
+                            "Product sync diagnostic sample",
+                            tenant_id=tenant_id,
+                            susoft_id=key,
+                            shopify_product_id=shopify_product_id,
+                            shopify_title=shop_product.get("title"),
+                            susoft_extracted_name=susoft_fields["name"],
+                            susoft_title_like_fields=title_like,
+                            susoft_extracted_price=susoft_fields["price"],
+                            susoft_extracted_vat=susoft_fields["vat_rate"],
+                            susoft_extracted_category=susoft_fields["category"],
+                            will_update_product=bool(product_updates),
+                        )
+                        sample_logged += 1
 
                     if product_updates:
                         await shopify_client.update_product(shopify_product_id, product_updates)

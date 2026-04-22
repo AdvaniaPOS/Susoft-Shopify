@@ -201,9 +201,13 @@ class ProductMappingResponse(BaseModel):
     current_shopify_stock: Optional[int]
     is_active: bool
     last_synced_at: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
 
 
 class SyncLogResponse(BaseModel):
@@ -218,24 +222,40 @@ class SyncLogResponse(BaseModel):
     new_stock: Optional[int]
     created_at: datetime
     completed_at: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
 
 
 class DLQItemResponse(BaseModel):
     """Response model for dead letter queue item."""
     id: str
+    tenant_id: Optional[str] = None
     task_name: str
     error_message: str
+    traceback: Optional[str] = None
+    payload: Optional[dict] = None
     retry_count: int
     alerted: bool
     resolved: bool
     created_at: datetime
     last_retry_at: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("id", "tenant_id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _uuid_to_str(cls, v):
+        return str(v) if v is not None else v
 
 
 class DashboardStats(BaseModel):

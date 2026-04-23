@@ -887,12 +887,45 @@ class SusoftClient:
 
             # /order/pos may return 500/400 for fields it doesn't like, or
             # 404 from an internal post-step even though the order WAS created.
-            # Check if the order exists before falling back to avoid duplicate
-            # creation attempts.
+            # The 404 message embeds the created orderId, e.g.
+            #   "Order not found @ 357 shop:100 orderId:501745"
+            # We MUST NOT fall back to /order in that case — that would
+            # create a duplicate (consuming two Susoft order numbers per
+            # Shopify order, which is what's been happening: every other id
+            # is missing).
             if use_pos_endpoint and endpoint == "/order/pos":
-                # Try to find order via altId or uuid (Susoft may index under
-                # either depending on which internal step succeeded). Retry
-                # once after a short sleep in case of replication lag.
+                # Parse orderId out of the error message — if present, the
+                # order definitely was created and we're done.
+                import re as _re
+                order_id_match = _re.search(r"orderId\s*[:=]\s*(\d+)", err_str)
+                if order_id_match:
+                    parsed_order_no = order_id_match.group(1)
+                    logger.info(
+                        "/order/pos returned post-create 404 with orderId; "
+                        "treating as success without fallback",
+                        shopify_order_id=shopify_order_id,
+                        alternative_id=order_data["alternativeId"],
+                        parsed_order_no=parsed_order_no,
+                        error=err_str,
+                    )
+                    # Best-effort lookup so we get the full payload, but do
+                    # not depend on it.
+                    try:
+                        existing = await self._find_existing_order(
+                            order_data["alternativeId"], retries=2
+                        )
+                        if existing:
+                            return existing
+                    except Exception:
+                        pass
+                    return {
+                        "alternativeId": order_data["alternativeId"],
+                        "orderNo": parsed_order_no,
+                        "status": "created",
+                        "post_create_lookup_failed": True,
+                    }
+
+                # No orderId in the error: try to find the order via lookup.
                 existing = await self._find_existing_order(
                     order_data["alternativeId"], retries=2
                 )
@@ -905,13 +938,15 @@ class SusoftClient:
                     )
                     return existing
 
-                # /order/pos may have locked the alternativeId server-side
-                # without actually persisting the order. Suffix the altId
-                # before fallback so /order doesn't immediately 409.
+                # Lookup found nothing AND no orderId in the error — only
+                # then is it safe to fall back to /order with a suffixed
+                # altId. This used to be the default path and caused
+                # duplicates whenever Susoft's post-create lookup glitched.
                 import time as _time
                 fallback_alt = f"{order_data['alternativeId']}-F{int(_time.time())}"
                 logger.warning(
-                    "/order/pos failed and lookup found nothing; falling back to /order with suffixed altId",
+                    "/order/pos failed, no orderId in error and lookup found "
+                    "nothing; falling back to /order with suffixed altId",
                     shopify_order_id=shopify_order_id,
                     error=err_str,
                     original_alt=order_data["alternativeId"],

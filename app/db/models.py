@@ -126,6 +126,12 @@ class Tenant(TimestampMixin, Base):
     susoft_api_url: Mapped[str] = mapped_column(String(500), nullable=False)
     susoft_api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     susoft_integration_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Susoft's numeric shop id used in order payloads (Order.shopId,
+    # Payment.shopId, Payment.issuedShopId). DIFFERENT from
+    # ``susoft_integration_id`` which is the API login user.
+    # Falls back to ``susoft_integration_id`` for backwards compatibility
+    # if not set.
+    susoft_shop_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     susoft_webhook_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Shopify configuration

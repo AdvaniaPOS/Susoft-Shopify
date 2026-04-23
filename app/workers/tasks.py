@@ -210,7 +210,9 @@ async def _process_shopify_order_async(
                     tenant_id=tenant_id,
                     order_data=order_data,
                     mapping_repo=mapping_repo,
-                    susoft_shop_id=tenant.susoft_integration_id
+                    susoft_shop_id=(
+                        tenant.susoft_shop_id or tenant.susoft_integration_id
+                    ),
                 )
                 
                 # Create order in Susoft with idempotency.

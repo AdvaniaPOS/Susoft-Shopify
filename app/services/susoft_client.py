@@ -942,49 +942,20 @@ class SusoftClient:
                 # then is it safe to fall back to /order with a suffixed
                 # altId. This used to be the default path and caused
                 # duplicates whenever Susoft's post-create lookup glitched.
-                import time as _time
-                fallback_alt = f"{order_data['alternativeId']}-F{int(_time.time())}"
-                logger.warning(
-                    "/order/pos failed, no orderId in error and lookup found "
-                    "nothing; falling back to /order with suffixed altId",
+                # Lookup found nothing AND no orderId in the error.
+                # We deliberately do NOT fall back to /order here — that
+                # would create a second order under a different altId,
+                # consuming two Susoft order numbers per Shopify order.
+                # Better to fail loudly and let Celery retry / operator
+                # investigate than to silently duplicate.
+                logger.error(
+                    "/order/pos failed and order could not be located; "
+                    "raising so Celery can retry (no fallback to /order)",
                     shopify_order_id=shopify_order_id,
+                    alternative_id=order_data["alternativeId"],
                     error=err_str,
-                    original_alt=order_data["alternativeId"],
-                    fallback_alt=fallback_alt,
                 )
-                order_data["alternativeId"] = fallback_alt
-                order_data["uuid"] = fallback_alt
-                try:
-                    return await self._request(
-                        "POST",
-                        "/order",
-                        params={"recalculate": str(recalculate).lower()},
-                        json_data=order_data,
-                    )
-                except SusoftAPIError as fallback_exc:
-                    fb_err = str(fallback_exc)
-                    if "409" in fb_err or "already exists" in fb_err.lower():
-                        logger.info(
-                            "Fallback /order returned 409; treating as success",
-                            shopify_order_id=shopify_order_id,
-                            alternative_id=order_data["alternativeId"],
-                        )
-                        existing = await self._find_existing_order(
-                            order_data["alternativeId"], retries=2
-                        )
-                        if existing:
-                            return existing
-                        logger.warning(
-                            "Fallback /order 409 but order not findable — returning stub",
-                            shopify_order_id=shopify_order_id,
-                            alternative_id=order_data["alternativeId"],
-                        )
-                        return {
-                            "alternativeId": order_data["alternativeId"],
-                            "status": "exists",
-                            "duplicate": True,
-                        }
-                    raise
+                raise
             raise
 
     async def _find_existing_order(

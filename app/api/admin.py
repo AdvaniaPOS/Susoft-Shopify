@@ -121,6 +121,8 @@ class TenantCreate(BaseModel):
     susoft_api_url: str = Field(..., description="Susoft API base URL")
     susoft_api_key: str = Field(..., description="Susoft API key (will be encrypted)")
     susoft_integration_id: str = Field(..., description="Susoft integration ID")
+    susoft_shop_id: Optional[str] = Field(None, description="Susoft numeric shop id used in order payloads (e.g. '100')")
+    susoft_pos_id: Optional[str] = Field(None, description="Susoft POS register / cash desk number")
     susoft_webhook_secret: str = Field(..., description="Secret for Susoft webhooks")
     
     # Shopify credentials
@@ -142,6 +144,8 @@ class TenantResponse(BaseModel):
     is_active: bool
     susoft_api_url: str
     susoft_integration_id: str
+    susoft_shop_id: Optional[str] = None
+    susoft_pos_id: Optional[str] = None
     shopify_shop_url: str
     shopify_default_location_id: Optional[str]
     sync_interval_seconds: int
@@ -294,6 +298,8 @@ async def create_tenant(
         susoft_api_url=tenant_data.susoft_api_url,
         susoft_api_key_encrypted=encrypt_credential(tenant_data.susoft_api_key),
         susoft_integration_id=tenant_data.susoft_integration_id,
+        susoft_shop_id=tenant_data.susoft_shop_id,
+        susoft_pos_id=tenant_data.susoft_pos_id,
         susoft_webhook_secret_encrypted=encrypt_credential(tenant_data.susoft_webhook_secret),
         shopify_shop_url=tenant_data.shopify_shop_url,
         shopify_access_token_encrypted=encrypt_credential(tenant_data.shopify_access_token),

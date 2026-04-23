@@ -137,7 +137,9 @@ class TenantRepository(BaseRepository[Tenant]):
         shopify_api_secret_encrypted: Optional[str] = None,
         shopify_default_location_id: Optional[str] = None,
         sync_interval_seconds: int = 300,
-        safety_stock_default: int = 0
+        safety_stock_default: int = 0,
+        susoft_shop_id: Optional[str] = None,
+        susoft_pos_id: Optional[str] = None,
     ) -> Tenant:
         """Create a new tenant."""
         from uuid import uuid4
@@ -150,6 +152,8 @@ class TenantRepository(BaseRepository[Tenant]):
             susoft_api_url=susoft_api_url,
             susoft_api_key_encrypted=susoft_api_key_encrypted,
             susoft_integration_id=susoft_integration_id,
+            susoft_shop_id=susoft_shop_id,
+            susoft_pos_id=susoft_pos_id,
             susoft_webhook_secret_encrypted=susoft_webhook_secret_encrypted,
             shopify_shop_url=shopify_shop_url.replace("https://", "").replace("http://", "").rstrip("/"),
             shopify_access_token_encrypted=shopify_access_token_encrypted,

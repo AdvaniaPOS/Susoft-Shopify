@@ -132,6 +132,8 @@ class Tenant(TimestampMixin, Base):
     # Falls back to ``susoft_integration_id`` for backwards compatibility
     # if not set.
     susoft_shop_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Optional POS register / cash desk number used by Susoft POS endpoints.
+    susoft_pos_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     susoft_webhook_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Shopify configuration

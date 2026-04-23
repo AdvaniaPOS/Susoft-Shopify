@@ -245,7 +245,10 @@ async def _process_shopify_order_async(
                     "Order synced to Susoft",
                     tenant_id=tenant_id,
                     shopify_order=order_name,
-                    susoft_order_id=result.get("uuid")
+                    susoft_order_id=result.get("uuid"),
+                    susoft_order_no=result.get("orderNo"),
+                    susoft_shop_id=result.get("shopId"),
+                    susoft_alt_id=result.get("alternativeId"),
                 )
 
                 # Mark + close Shopify order so nobody fulfills it manually
@@ -674,7 +677,7 @@ async def _build_susoft_order(
 
         mapping = await mapping_repo.get_by_sku(tenant_id, sku)
 
-        product_ref: Dict[str, Any] = {"barcode": sku}
+        product_ref: Dict[str, Any] = {}
         if mapping and mapping.susoft_product_id:
             product_ref["id"] = mapping.susoft_product_id
         else:
@@ -749,10 +752,7 @@ async def _build_susoft_order(
                 tenant_id=tenant_id,
                 shipping_sku=shipping_sku,
             )
-        shipping_product: Dict[str, Any] = {
-            "id": shipping_product_id,
-            "barcode": shipping_sku,
-        }
+        shipping_product: Dict[str, Any] = {"id": shipping_product_id}
 
         lines.append({
             "lineNo": next_line_no,
